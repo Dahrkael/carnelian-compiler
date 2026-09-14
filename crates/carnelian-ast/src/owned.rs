@@ -3,15 +3,16 @@
 //! Shipping-safe (no FFI, no `unsafe`). Children are plain reborrows, so
 //! the wrapper stays `Clone`/`Copy` like any other cheap node handle.
 
-use carnelian_ast::view::{
+use crate::view::{
     BackendNode, BeginView, BlockParamView, BlockView, CallTargetView, CallView, CaseView,
     ClassView, ConstPathRead, ConstPathWrite, DefView, EnsureView, IfView, IndexTargetView,
     IntegerLit, KeywordParamView, LambdaView, LvarRef, LvarWrite, ModuleView, MultiTargetView,
     MultiWriteView, ParamsView, ProgramView, RescueModifierView, RescueView, SclassView, SimpleLit,
     SuperView, VarWrite, WhenView, WhileView, YieldView,
 };
-use carnelian_ast::{
-    arguments_node_flags, call_node_flags, loop_flags, AstNode, Integer, Node, SymbolId, SymbolPool,
+use crate::{
+    arguments_node_flags, call_node_flags, loop_flags, AstNode, Integer, Node, Span, SymbolId,
+    SymbolPool,
 };
 
 /// Borrowed owned tree plus its symbol pool.
@@ -107,7 +108,7 @@ impl AstNode for Owned<'_> {
         self.node.kind_name()
     }
 
-    fn span(&self) -> carnelian_ast::Span {
+    fn span(&self) -> Span {
         self.node.span()
     }
 

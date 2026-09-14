@@ -2,9 +2,10 @@
 
 use carnelian_ast::view::{BackendNode, IntegerLit};
 use carnelian_ast::AstNode;
-use carnelian_ast::{arguments_node_flags, call_node_flags, loop_flags, Integer, Node, Span};
-use carnelian_ast::{SymbolId, SymbolPool};
-use carnelian_front_owned::Owned;
+use carnelian_ast::{
+    arguments_node_flags, call_node_flags, loop_flags, Integer, Node, Owned, Span, SymbolId,
+    SymbolPool,
+};
 
 fn span() -> Span {
     Span { start: 0, end: 1 }
@@ -167,19 +168,8 @@ fn bigint_fallback_normalizes_like_ffi() {
     );
     // Non-decimal bytes fail closed.
     assert!(owned(&fallback(b"12x3"), &pool).integer_lit().is_none());
-
-    // Cross-check one value against the FFI reference implementation.
-    let parsed = carnelian_front_prism::parse(b"170141183460469231731687303715884105728\n");
-    assert!(parsed.errors().is_empty());
-    let root = parsed.root();
-    let statements = root
-        .program()
-        .expect("program")
-        .body
-        .statements()
-        .expect("stmts");
-    let ffi_lit = statements[0].integer_lit().expect("ffi int");
-    assert_eq!(owned(&big, &pool).integer_lit(), Some(ffi_lit));
+    // FFI cross-checks live in `front-prism/tests/lower_roundtrip.rs`,
+    // where both implementations are linked; this crate stays FFI-free.
 }
 
 #[test]

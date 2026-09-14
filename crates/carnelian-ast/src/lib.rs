@@ -5,7 +5,10 @@
 
 use std::collections::BTreeMap;
 
+pub mod owned;
 pub mod view;
+
+pub use owned::Owned;
 
 include!(concat!(env!("OUT_DIR"), "/node_generated.rs"));
 

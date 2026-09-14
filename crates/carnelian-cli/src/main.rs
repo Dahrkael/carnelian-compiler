@@ -151,7 +151,7 @@ fn compile_source(
             if !errors.is_empty() {
                 return Err(parse_errors_text(&errors));
             }
-            carnelian_compiler::compile_prism(parsed.root(), opts)
+            carnelian_compiler::compile_tree(parsed.root(), opts)
                 .map_err(|diagnostics| format!("{diagnostics}"))
         }
         "owned" => {
@@ -160,12 +160,12 @@ fn compile_source(
             if !errors.is_empty() {
                 return Err(parse_errors_text(&errors));
             }
-            let (node, pool) = carnelian_front_owned::lower(parsed.root());
-            let owned = carnelian_front_owned::Owned {
+            let (node, pool) = carnelian_front_prism::lower(parsed.root());
+            let owned = carnelian_ast::Owned {
                 node: &node,
                 pool: &pool,
             };
-            carnelian_compiler::compile_prism(owned, opts)
+            carnelian_compiler::compile_tree(owned, opts)
                 .map_err(|diagnostics| format!("{diagnostics}"))
         }
         _ => unreachable!("frontend checked by the caller"),

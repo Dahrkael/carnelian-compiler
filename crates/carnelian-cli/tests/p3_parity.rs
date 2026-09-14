@@ -171,7 +171,7 @@ fn p3_gated_agreement() {
     }
 }
 
-// Host-only fixture: a hand-built owned tree through `compile_prism::<Owned>`
+// Host-only fixture: a hand-built owned tree through `compile_tree::<Owned>`
 // with no FFI involved, asserting the exact reference bytes. This is the
 // shipping (`wasm32`) path exercised on the host.
 const EXPECTED_EMPTY_MRB: &[u8] = &[
@@ -190,12 +190,12 @@ const EXPECTED_PUTS1_MRB: &[u8] = &[
 ];
 
 fn compile_owned_tree(root: &carnelian_ast::Node, pool: &carnelian_ast::SymbolPool) -> Vec<u8> {
-    let owned = carnelian_front_owned::Owned { node: root, pool };
+    let owned = carnelian_ast::Owned { node: root, pool };
     let opts = carnelian_compiler::CompileOptions {
         stripped: false,
         filename: None,
     };
-    carnelian_compiler::compile_prism(owned, &opts).expect("owned fixture compiles")
+    carnelian_compiler::compile_tree(owned, &opts).expect("owned fixture compiles")
 }
 
 #[test]

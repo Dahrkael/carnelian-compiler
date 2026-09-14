@@ -5049,11 +5049,11 @@ fn gen_retry<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(),
     Ok(())
 }
 
-/// Compile a parsed program root to a RITE binary (P1 entry).
+/// Compile a parsed program tree to a RITE binary (any `BackendNode`).
 ///
 /// The reference dumps with flags `0`, so `stripped` currently changes no
 /// byte; both modes must match the same golden (see `agents/progress.md`).
-pub fn compile_prism<N: BackendNode>(
+pub fn compile_tree<N: BackendNode>(
     root: N,
     _opts: &CompileOptions,
 ) -> Result<Vec<u8>, Diagnostics> {

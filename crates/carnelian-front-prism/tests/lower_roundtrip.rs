@@ -4,8 +4,7 @@
 //! intact; targeted tests pin field shapes per family.
 
 use carnelian_ast::{Integer, Node, SymbolPool, Visit as _};
-use carnelian_front_owned::lower;
-use carnelian_front_prism as front;
+use carnelian_front_prism::{self as front, lower};
 use ruby_prism_sys::{
     pm_arguments_node_flags, pm_call_node_flags, pm_loop_flags, pm_range_flags,
     pm_regular_expression_flags,
@@ -1001,4 +1000,35 @@ fn missing_node_survives_error_recovery() {
         "expected a MissingNode, got {:?}",
         census.rows.iter().map(|row| &row.0).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn owned_integer_matches_ffi_for_huge_values() {
+    use carnelian_ast::view::BackendNode;
+    // 2^127 overflows i64: both accessors must agree exactly.
+    let source = "170141183460469231731687303715884105728";
+    let parsed = front::parse(source.as_bytes());
+    assert!(parsed.errors().is_empty());
+    let root = parsed.root();
+    let ffi_lit = root
+        .program()
+        .expect("program")
+        .body
+        .statements()
+        .expect("stmts")[0]
+        .integer_lit()
+        .expect("ffi int");
+    let (node, pool) = lower(parsed.root());
+    let statements = match &node {
+        Node::ProgramNode { statements, .. } => match statements.as_ref() {
+            Node::StatementsNode { body, .. } => body,
+            _ => panic!("statements"),
+        },
+        _ => panic!("program"),
+    };
+    let owned = carnelian_ast::Owned {
+        node: &statements[0],
+        pool: &pool,
+    };
+    assert_eq!(owned.integer_lit(), Some(ffi_lit));
 }

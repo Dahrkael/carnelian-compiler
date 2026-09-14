@@ -1,4 +1,5 @@
-//! Thin borrowed frontend over `ruby-prism` (`PrismNode` wraps the FFI node).
+//! Borrowed frontend over `ruby-prism`: the `PrismNode` adapter plus the
+//! `lower` pass to the owned AST.
 //!
 //! Dev/CLI only: the shipping library never includes this crate. The backend
 //! sees nodes through `BackendNode`, implemented here in the handlers slice.
@@ -6,6 +7,9 @@
 use carnelian_ast::{AstNode, Span};
 
 pub mod backend;
+pub mod lower;
+
+pub use lower::lower;
 
 include!(concat!(env!("OUT_DIR"), "/kind_generated.rs"));
 

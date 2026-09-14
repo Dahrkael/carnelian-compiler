@@ -6,7 +6,8 @@
 //! `integer` fields become the `Integer` model and flags stay raw `u16`.
 
 use carnelian_ast::{Integer, Node, Span, SymbolPool};
-use carnelian_front_prism::PrismNode;
+
+use crate::PrismNode;
 
 /// Lower a parsed FFI root to its owned tree plus symbol pool.
 pub fn lower(root: PrismNode<'_>) -> (Node, SymbolPool) {

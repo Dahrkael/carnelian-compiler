@@ -14,7 +14,7 @@ pub mod writer;
 
 pub use codegen::{CodegenError, Session};
 pub use diagnostics::{Diagnostic, Diagnostics};
-pub use handlers::{codegen, compile_prism, Codegen};
+pub use handlers::{codegen, compile_tree, Codegen};
 pub use irep::{CatchHandler, Irep, PoolValue, RiteModel};
 pub use reader::{read_rite, ReadError};
 pub use writer::{roundtrip, write_rite};
