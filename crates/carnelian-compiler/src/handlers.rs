@@ -994,8 +994,9 @@ fn enter_block_scope<N: BackendNode>(
     scope.push_n(1)
 }
 
-/// `yield` (`PM_YIELD_NODE`): `BLKPUSH` plus `BLKCALL` for plain
-/// positional arguments. Keyword and splat forms stay gated like calls.
+/// `yield` (`PM_YIELD_NODE`): `BLKPUSH` plus a direct `BLKCALL` for plain
+/// positional arguments, falling back to `:call` dispatch when keyword
+/// arguments or an array-gathered list are present.
 fn gen_yield<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
     let Some(view) = node.yield_view() else {
         return Err(unsupported(&node, "yield"));
@@ -1010,40 +1011,68 @@ fn gen_yield<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(),
     }
     let operand = Codegen::mscope_operand(ainfo, level)?;
     cg.current().1.push_n(1)?;
-    let mut count: i32 = 0;
-    let mut have = 0;
+    let mut n: i32 = 0;
+    let mut nk: i32 = 0;
+    let mut st: i32 = 0;
     if let Some(args) = view.args {
-        let Some(items) = args.call_args() else {
+        let Some(mut items) = args.call_args() else {
             return Err(unsupported(&node, "complex arguments"));
         };
+        // Keyword arguments follow the positional ones in a single
+        // `KeywordHashNode`; `gen_values` stops at it.
+        let keywords = match items
+            .iter()
+            .position(|item| item.kind_name() == "KeywordHashNode")
+        {
+            Some(first) => items.split_off(first),
+            None => Vec::new(),
+        };
         if !items.is_empty() {
-            count = gen_values(cg, items, true, CALL_ARG_LIMIT)?;
-            if count < 0 {
-                count = 15;
-                have = 1;
+            n = gen_values(cg, items, true, CALL_ARG_LIMIT)?;
+            if n < 0 {
+                st = 1;
+                n = CALL_MAXARGS;
                 cg.current().1.push_n(1)?;
             } else {
-                have = count;
+                st = n;
             }
+        }
+        for keyword in keywords {
+            let Some(elements) = keyword.hash_elements() else {
+                return Err(unsupported(&keyword, "keyword arguments"));
+            };
+            nk = gen_hash(cg, elements, true, CALL_ARG_LIMIT)?;
+            if nk < 0 {
+                st += 1;
+                nk = CALL_MAXARGS;
+            } else {
+                st += nk * 2;
+            }
+            n |= nk << 4;
         }
     }
     {
         let (_, scope) = cg.current();
         scope.push_n(1)?;
         scope.pop_n(1)?;
-        scope.pop_n((have as u16).checked_add(1).ok_or_else(too_complex)?)?;
+        scope.pop_n(u16::try_from(st + 1).map_err(|_| too_complex())?)?;
     }
     {
         let (session, scope) = cg.current();
         let dst = scope.cursp();
         scope.genop_2s(session, opcode::OP_BLKPUSH, dst, operand)?;
     }
-    {
-        // Plain path only (`nk == 0 && n < 15`); keyword and splat
-        // arguments are gated above via `call_args`.
+    if nk == 0 && n < CALL_MAXARGS {
+        // Fast path: direct block call without method dispatch.
         let (session, scope) = cg.current();
         let dst = scope.cursp();
-        scope.genop_2(session, opcode::OP_BLKCALL, dst, count as u16)?;
+        scope.genop_2(session, opcode::OP_BLKCALL, dst, n as u16)?;
+    } else {
+        // `SEND` carries the keyword count / splat array to `Proc#call`.
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        let sym = scope.new_sym(session, b"call")?;
+        scope.genop_3(session, opcode::OP_SEND, dst, sym, n as u8)?;
     }
     if val {
         cg.current().1.push_n(1)?;

@@ -84,6 +84,19 @@ const SNIPPETS: &[(&str, &str)] = &[
     ("kwargs_double_mixed", "h = {a: 1}\nf(1, **h, b: 2)\n"),
     ("kwargs_double_then_kw", "h = {a: 1}\nf(**h, b: 2)\n"),
     ("kwargs_noval", "f(k: 1)\nputs 3\n"),
+    // yield argument transport (positional, keyword, splat)
+    ("yield_bare", "def m\n  yield\nend\nm { 1 }\n"),
+    (
+        "yield_pos",
+        "def m\n  yield 1, 2\nend\nm { |a, b| puts a }\n",
+    ),
+    ("yield_kw", "def m\n  yield k: 1\nend\nm { 1 }\n"),
+    ("yield_splat", "def m\n  yield *a\nend\nm { |x| puts x }\n"),
+    ("yield_double_splat", "def m\n  yield **h\nend\nm { 1 }\n"),
+    (
+        "yield_maxargs",
+        "def m\n  yield 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15\nend\nm { |a| a }\n",
+    ),
     // multiple assignment
     ("masgn_array", "a, b = [1, 2]\nputs a\nputs b\n"),
     ("masgn_list", "a, b = 1, 2\nputs a\n"),
