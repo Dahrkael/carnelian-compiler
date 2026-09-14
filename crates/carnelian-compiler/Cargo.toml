@@ -8,8 +8,13 @@ description = "Pure-Rust RITE backend (irep model + writer). No C, no FFI."
 keywords = ["ruby", "mruby", "rite", "compiler"]
 
 [features]
+# Frontend selectors. The generic `compile_prism` entry behind `front-prism`
+# takes any `BackendNode`; the FFI adapter crate itself is wired by the CLI,
+# so the shipping library never links C.
 default = ["front-owned"]
 front-owned = []
+front-prism = []
+front-mri = []
 
 [dependencies]
 carnelian-ast = { workspace = true }

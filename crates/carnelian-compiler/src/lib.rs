@@ -4,12 +4,17 @@
 //! round-trip. Codegen tranches (P1/P2) build on the [`carnelian_ast::AstNode`]
 //! boundary; this crate never sees C.
 
+pub mod codegen;
 pub mod diagnostics;
+pub mod handlers;
 pub mod irep;
+pub mod opcode;
 pub mod reader;
 pub mod writer;
 
+pub use codegen::{CodegenError, Session};
 pub use diagnostics::{Diagnostic, Diagnostics};
+pub use handlers::{codegen, compile_prism, Codegen};
 pub use irep::{CatchHandler, Irep, PoolValue, RiteModel};
 pub use reader::{read_rite, ReadError};
 pub use writer::{roundtrip, write_rite};
