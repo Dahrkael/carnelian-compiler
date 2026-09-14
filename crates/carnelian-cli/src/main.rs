@@ -51,6 +51,9 @@ enum Command {
     Verify {
         /// Source file (`-` reads stdin).
         input: PathBuf,
+        /// Frontend selector.
+        #[arg(long, default_value = "prism")]
+        frontend: String,
     },
 }
 
@@ -113,7 +116,66 @@ fn cmd_reference(input: &PathBuf, output: &PathBuf) -> i32 {
     }
 }
 
-fn cmd_verify(input: &PathBuf) -> i32 {
+fn check_frontend(frontend: &str) -> Result<(), i32> {
+    if frontend == "prism" || frontend == "owned" {
+        Ok(())
+    } else {
+        eprintln!("error: unknown frontend '{frontend}' (expected 'prism' or 'owned')");
+        Err(2)
+    }
+}
+
+fn parse_errors_text(errors: &[carnelian_front_prism::ParseDiagnostic]) -> String {
+    let mut text = String::new();
+    for diagnostic in errors {
+        text.push_str(&format!(
+            "error: {} ({}:{})\n",
+            diagnostic.message, diagnostic.start, diagnostic.end
+        ));
+    }
+    text
+}
+
+/// Compile source with the selected frontend: `prism` uses the borrowed
+/// FFI tree directly, `owned` lowers it to the owned AST first. Both feed
+/// the same generic backend, so bytes must agree.
+fn compile_source(
+    frontend: &str,
+    source: &str,
+    opts: &carnelian_compiler::CompileOptions,
+) -> Result<Vec<u8>, String> {
+    match frontend {
+        "prism" => {
+            let parsed = carnelian_front_prism::parse(source.as_bytes());
+            let errors = parsed.errors();
+            if !errors.is_empty() {
+                return Err(parse_errors_text(&errors));
+            }
+            carnelian_compiler::compile_prism(parsed.root(), opts)
+                .map_err(|diagnostics| format!("{diagnostics}"))
+        }
+        "owned" => {
+            let parsed = carnelian_front_prism::parse(source.as_bytes());
+            let errors = parsed.errors();
+            if !errors.is_empty() {
+                return Err(parse_errors_text(&errors));
+            }
+            let (node, pool) = carnelian_front_owned::lower(parsed.root());
+            let owned = carnelian_front_owned::Owned {
+                node: &node,
+                pool: &pool,
+            };
+            carnelian_compiler::compile_prism(owned, opts)
+                .map_err(|diagnostics| format!("{diagnostics}"))
+        }
+        _ => unreachable!("frontend checked by the caller"),
+    }
+}
+
+fn cmd_verify(input: &PathBuf, frontend: &str) -> i32 {
+    if let Err(code) = check_frontend(frontend) {
+        return code;
+    }
     let source = match read_input(input) {
         Ok(source) => source,
         Err(message) => {
@@ -134,21 +196,10 @@ fn cmd_verify(input: &PathBuf) -> i32 {
             stripped,
             filename: None,
         };
-        let parsed = carnelian_front_prism::parse(source.as_bytes());
-        let errors = parsed.errors();
-        if !errors.is_empty() {
-            for diagnostic in &errors {
-                eprintln!(
-                    "error: {} ({}:{})",
-                    diagnostic.message, diagnostic.start, diagnostic.end
-                );
-            }
-            return 1;
-        }
-        let compiled = match carnelian_compiler::compile_prism(parsed.root(), &opts) {
+        let compiled = match compile_source(frontend, &source, &opts) {
             Ok(bytes) => bytes,
-            Err(diagnostics) => {
-                eprint!("{diagnostics}");
+            Err(text) => {
+                eprint!("{text}");
                 return 1;
             }
         };
@@ -175,9 +226,8 @@ fn cmd_verify(input: &PathBuf) -> i32 {
 }
 
 fn cmd_compile(input: &PathBuf, output: &PathBuf, strip: bool, frontend: &str) -> i32 {
-    if frontend != "prism" {
-        eprintln!("error: frontend '{frontend}' is unavailable in P1 (only 'prism')");
-        return 2;
+    if let Err(code) = check_frontend(frontend) {
+        return code;
     }
     let source = match read_input(input) {
         Ok(source) => source,
@@ -190,18 +240,7 @@ fn cmd_compile(input: &PathBuf, output: &PathBuf, strip: bool, frontend: &str) -
         stripped: strip,
         filename: None,
     };
-    let parsed = carnelian_front_prism::parse(source.as_bytes());
-    let errors = parsed.errors();
-    if !errors.is_empty() {
-        for diagnostic in &errors {
-            eprintln!(
-                "error: {} ({}:{})",
-                diagnostic.message, diagnostic.start, diagnostic.end
-            );
-        }
-        return 1;
-    }
-    match carnelian_compiler::compile_prism(parsed.root(), &opts) {
+    match compile_source(frontend, &source, &opts) {
         Ok(bytes) => {
             if let Err(err) = std::fs::write(output, &bytes) {
                 eprintln!("error: cannot write {}: {err}", output.display());
@@ -210,8 +249,8 @@ fn cmd_compile(input: &PathBuf, output: &PathBuf, strip: bool, frontend: &str) -
             println!("compile: {} bytes -> {}", bytes.len(), output.display());
             0
         }
-        Err(diagnostics) => {
-            eprint!("{diagnostics}");
+        Err(text) => {
+            eprint!("{text}");
             1
         }
     }
@@ -238,7 +277,7 @@ fn main() {
             frontend,
         }) => cmd_compile(input, output, *strip, frontend),
         Some(Command::Reference { input, output }) => cmd_reference(input, output),
-        Some(Command::Verify { input }) => cmd_verify(input),
+        Some(Command::Verify { input, frontend }) => cmd_verify(input, frontend),
     };
     std::process::exit(code);
 }

@@ -3,70 +3,10 @@
 
 use std::process::Command;
 
-const SNIPPETS: &[(&str, &str)] = &[
-    ("empty", ""),
-    ("puts_int", "puts 1\n"),
-    ("arith", "puts 1 + 2 * 3\n"),
-    ("neg_one", "puts -1\n"),
-    ("sub_fusion", "puts 10 - 3\n"),
-    ("int8", "puts 300\n"),
-    ("int16", "puts 70000\n"),
-    ("int64", "x = 3000000000\nputs x\n"),
-    ("bigint", "puts 99999999999999999999999\n"),
-    ("neg_bigint", "puts -99999999999999999999999\n"),
-    ("bigint_hex", "puts 0xFFFFFFFFFFFFFFFFFF\n"),
-    ("bigint_oct", "puts 0o7777777777777777777777\n"),
-    (
-        "bigint_bin",
-        "puts 0b1111111111111111111111111111111111111111111111111111111111111111111111111\n",
-    ),
-    (
-        "bigint_huge_hex",
-        "puts 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\n",
-    ),
-    ("neg_bigint_hex", "puts -0xFFFFFFFFFFFFFFFFFF\n"),
-    (
-        "bigint_hex_underscores",
-        "puts 0xFF_FF_FF_FF_FF_FF_FF_FF_FF\n",
-    ),
-    ("float", "puts 1.5\n"),
-    ("neg_float", "puts -2.5\n"),
-    ("neg_zero_float", "puts -0.0\n"),
-    ("string", "puts \"hello\"\n"),
-    ("string_escape", "puts \"a\\nb\"\n"),
-    ("string_empty", "puts \"\"\n"),
-    ("symbol", "puts :sym\n"),
-    ("nil_lit", "puts nil\n"),
-    ("true_lit", "puts true\n"),
-    ("self_lit", "puts self\n"),
-    ("if_else", "if true then puts 1 else puts 2 end\n"),
-    ("if_no_else", "x = nil\nif x then puts 1 end\nputs 2\n"),
-    ("ternary", "puts(true ? 1 : 2)\n"),
-    ("unless_mod", "puts 1 unless false\n"),
-    ("logic_and", "puts(true && false)\n"),
-    ("logic_or", "puts(false || 2)\n"),
-    ("compare", "puts(1 < 2)\nputs(1 == 1)\n"),
-    ("array", "puts [1, 2]\n"),
-    ("array_empty", "puts []\n"),
-    ("array_nested", "puts [[1]]\n"),
-    ("lvars", "x = 1 + 2\nputs x * x\n"),
-    (
-        "while_loop",
-        "i = 0\nwhile i < 3 do i = i + 1 end\nputs i\n",
-    ),
-    ("while_empty", "i = 0\nwhile i < 0 do end\nputs i\n"),
-    (
-        "until_loop",
-        "i = 0\nuntil i > 2 do i = i + 1 end\nputs i\n",
-    ),
-    ("nil_check", "x = nil\nputs x.nil?\n"),
-    ("if_empty_then", "x = nil\nif x then end\nputs 1\n"),
-    ("if_empty_then_val", "x = nil\nif x then end\n"),
-    (
-        "if_empty_else",
-        "y = nil\nif y then puts 1 else end\nputs 2\n",
-    ),
-];
+#[path = "corpus.rs"]
+mod corpus;
+
+use corpus::P1_SNIPPETS as SNIPPETS;
 
 fn carnelian() -> Command {
     Command::new(env!("CARGO_BIN_EXE_carnelian"))

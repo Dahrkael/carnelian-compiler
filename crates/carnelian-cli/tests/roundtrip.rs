@@ -4,34 +4,10 @@
 
 use std::process::Command;
 
-const SNIPPETS: &[(&str, &str)] = &[
-    ("empty", ""),
-    ("puts_int", "puts 1\n"),
-    ("arith", "puts 1 + 2 * 3\n"),
-    ("int64_over_i32", "x = 3000000000\nputs x\n"),
-    ("bigint_over_i64", "x = 99999999999999999999999\nputs x\n"),
-    ("float", "x = 1.5\nputs x\n"),
-    ("string", "puts \"hello\"\n"),
-    ("symbol", "puts :sym\n"),
-    ("array", "a = [1, 2, 3]\nputs a\n"),
-    ("hash", "h = {a: 1, \"b\" => 2}\nputs h\n"),
-    ("if_else", "if true then puts 1 else puts 2 end\n"),
-    ("while_loop", "i = 0\nwhile i < 3 do i += 1 end\nputs i\n"),
-    ("def_call", "def add(a, b)\n  a + b\nend\nputs add(1, 2)\n"),
-    (
-        "class_def",
-        "class Foo\n  def bar\n    42\n  end\nend\nputs Foo.new.bar\n",
-    ),
-    ("block", "[1, 2, 3].each { |x| puts x }\n"),
-    ("rescue", "begin\n  foo\nrescue\n  bar\nend\n"),
-    ("interp", "name = \"w\"\nputs \"hi #{name}\"\n"),
-    ("splat", "a = [1, 2, 3]\nb = [*a, 4]\nputs b\n"),
-    ("kwargs", "def f(a:, b: 2)\n  a + b\nend\nputs f(a: 1)\n"),
-    ("lambda", "f = ->(x) { x * 2 }\nputs f.call(21)\n"),
-    ("const", "X = 1\nputs X\n"),
-    ("logic", "a = true && false || true\nputs a\n"),
-    ("case", "case 1\nwhen 1 then puts 1\nelse puts 2\nend\n"),
-];
+#[path = "corpus.rs"]
+mod corpus;
+
+use corpus::ROUNDTRIP_SNIPPETS as SNIPPETS;
 
 fn carnelian() -> Command {
     Command::new(env!("CARGO_BIN_EXE_carnelian"))
@@ -109,17 +85,40 @@ fn cli_exit_codes() {
     );
     assert!(output.exists());
 
-    // Unavailable frontends are a usage error (exit 2).
+    // `compile --frontend owned` matches `prism` byte for byte (exit 0).
+    let owned_out = dir.path().join("ok.owned.mrb");
     let owned = carnelian()
         .arg("compile")
         .arg(&input)
         .arg("-o")
-        .arg(&output)
+        .arg(&owned_out)
         .arg("--frontend")
         .arg("owned")
         .output()
         .expect("run owned compile");
-    assert_eq!(owned.status.code(), Some(2));
+    assert_eq!(
+        owned.status.code(),
+        Some(0),
+        "owned compile failed: {}",
+        String::from_utf8_lossy(&owned.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&output).expect("read prism output"),
+        std::fs::read(&owned_out).expect("read owned output"),
+        "owned diverges from prism"
+    );
+
+    // Unknown frontends are a usage error (exit 2).
+    let unknown = carnelian()
+        .arg("compile")
+        .arg(&input)
+        .arg("-o")
+        .arg(&owned_out)
+        .arg("--frontend")
+        .arg("bogus")
+        .output()
+        .expect("run unknown compile");
+    assert_eq!(unknown.status.code(), Some(2));
 
     // Broken source fails compilation with exit 1.
     let bad = dir.path().join("bad.rb");

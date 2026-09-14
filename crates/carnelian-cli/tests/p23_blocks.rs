@@ -5,66 +5,10 @@
 
 use std::process::Command;
 
-const SNIPPETS: &[(&str, &str)] = &[
-    ("block_args", "puts [1, 2].map { |x| x + 1 }\n"),
-    ("block_do", "[1].each do |x|\nputs x\nend\n"),
-    ("block_noval", "[1].each { |x| puts x }\nputs 1\n"),
-    ("block_noargs", "puts [1].map { 42 }\n"),
-    ("block_empty", "puts [1].map { }\n"),
-    ("block_empty_params", "[1].each { || puts 1 }\n"),
-    ("block_multi", "[1, 2].each { |a, b| puts a }\n"),
-    ("block_rest", "[1, 2].each { |*a| puts a }\n"),
-    ("block_shadow", "x = 1\n[1].each { |x| puts x }\nputs x\n"),
-    (
-        "block_nested",
-        "[1].each { |a| [2].each { |b| puts a + b } }\n",
-    ),
-    ("block_capture", "x = 10\n[1].each { puts x }\n"),
-    ("block_write_capture", "x = 1\n[1].each { x = 2 }\nputs x\n"),
-    ("lambda_basic", "f = -> { 1 }\nputs f.call\n"),
-    ("lambda_args", "f = ->(x) { x + 1 }\nputs f.call(2)\n"),
-    ("lambda_rest", "f = ->(*a) { puts a }\nf.call(1, 2)\n"),
-    ("sym_proc", "puts [1, 2].map(&:to_s)\n"),
-    ("numbered", "puts [1, 2].map { _1 + 1 }\n"),
-    ("it_block", "puts [1, 2].map { it + 1 }\n"),
-    ("semi_local", "[1].each { |x; y| y = x + 1\nputs y }\n"),
-    ("block_destructure", "[1].each { |(a, b)| puts a }\n"),
-    (
-        "block_destructure_rest",
-        "[1].each { |a, (b, c)| puts b }\n",
-    ),
-    ("block_optional", "[1].each { |x = 1| puts x }\n"),
-    ("block_post", "[1, 2, 3].each { |a, *b, c| puts c }\n"),
-    ("block_keyword", "[1].each { |x: 1| puts x }\n"),
-    ("block_param", "[1].each { |&b| puts b }\n"),
-    (
-        "block_mixed",
-        "[1].each { |a, b = 1, *c, d, e:, **f, &g| puts a }\n",
-    ),
-    (
-        "lambda_optional",
-        "f = ->(a, b = 1) { a + b }\nputs f.call(1)\n",
-    ),
-    (
-        "lambda_keyword",
-        "f = ->(a:, b: 2) { a + b }\nputs f.call(a: 1)\n",
-    ),
-    (
-        "lambda_rest_block",
-        "f = ->(*a, &b) { a }\nputs f.call(1)\n",
-    ),
-    (
-        "lambda_mixed",
-        "f = ->(a, *b, c, d: 1, &e) { puts a }\nf.call(1, 2, 3)\n",
-    ),
-];
+#[path = "corpus.rs"]
+mod corpus;
 
-/// Still-gated forms: compilation must fail with a diagnostic, and must
-/// never emit bytes that diverge from the reference.
-const GATED: &[(&str, &str, &str)] = &[
-    ("yield_naked", "yield\n", "Invalid yield"),
-    ("yield_args", "yield 1\n", "Invalid yield"),
-];
+use corpus::{P23_GATED as GATED, P23_SNIPPETS as SNIPPETS};
 
 fn carnelian() -> Command {
     Command::new(env!("CARGO_BIN_EXE_carnelian"))
