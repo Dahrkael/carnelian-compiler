@@ -57,3 +57,22 @@ is recorded here with cause. User decisions are not deviations.
 - The `sp >= 99` argument flush inside `gen_values` is deferred with the
   splat tranche: unreachable below 99 registers, and the corpus never gets
   close.
+
+## Reviewer round on P1 (applied, same worktree)
+
+- Real bugs fixed: `Decoded.a` truncated `OP_ENTER` (now `u32`, faithful to
+  `mrc_insn_data`); `genjmp2` recursed on chained `MOVE`s instead of the
+  single C rewrite; widened jumps stamped `lastpc` before `EXT1` (C stamps
+  after); `Int64` pool dedup was missing (`mrc_common.h` defines
+  `MRC_64BIT`, proven by a duplicated-literal golden); empty statement
+  lists skipped `LOADNIL` in `NOVAL` mode.
+- `codegen()` null-tree guard discovered: a null subtree emits `LOADNIL`
+  only when valued, while an empty statements *node* always emits it.
+  Option branches route through `gen_branch`; verified against goldens for
+  empty `while` bodies and empty `then`/`else` in both modes.
+- `new_sym` mirrors the C `scapa` doubling, so the 32768-symbol limit
+  matches instead of 65535.
+- Declined with reason: merging the `nil?`/`if` jump skeletons (the former
+  carries an extra unconditional jump), a widening helper for `genop_*`
+  (hot path, no need), removing the `last_insn` fallback (it guards genuinely
+  unreachable decodes).
