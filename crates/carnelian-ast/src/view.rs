@@ -116,6 +116,7 @@ pub struct WhenView<N> {
     /// Body statements.
     pub body: Option<Vec<N>>,
 }
+
 /// Program parts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgramView<N> {
@@ -132,6 +133,8 @@ pub struct ProgramView<N> {
 pub struct BeginView<N> {
     /// Body statements.
     pub statements: Option<Vec<N>>,
+    /// No `rescue`, `else` or `ensure` clause.
+    pub bare: bool,
     /// First `rescue` clause.
     pub rescue_clause: Option<N>,
     /// `else` clause.
@@ -617,6 +620,31 @@ pub trait BackendNode: AstNode + Sized {
         None
     }
 
+    /// `alias` new and old names (`AliasMethodNode`).
+    fn alias_pair(&self) -> Option<(Self, Self)> {
+        None
+    }
+
+    /// `undef` name list (`UndefNode`).
+    fn undef_list(&self) -> Option<Vec<Self>> {
+        None
+    }
+
+    /// `defined?` operand (`DefinedNode`).
+    fn defined_value(&self) -> Option<Self> {
+        None
+    }
+
+    /// Implicit value (`ImplicitNode`).
+    fn implicit_value(&self) -> Option<Self> {
+        None
+    }
+
+    /// Parentheses body (`ParenthesesNode`); `Some(None)` for empty `()`.
+    fn parentheses_body(&self) -> Option<Option<Self>> {
+        None
+    }
+
     /// `begin` parts (`BeginNode`).
     fn begin_view(&self) -> Option<BeginView<Self>> {
         None
@@ -650,5 +678,41 @@ pub trait BackendNode: AstNode + Sized {
     /// Whether an arguments node carries `...` forwarding.
     fn args_forwarding(&self) -> bool {
         false
+    }
+
+    /// Instance variable read name (`InstanceVariableReadNode`).
+    fn instance_var_read_name(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Global variable read name (`GlobalVariableReadNode`).
+    fn global_var_read_name(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Class variable read name (`ClassVariableReadNode`).
+    fn class_var_read_name(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Constant read name (`ConstantReadNode`).
+    fn constant_read_name(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Constant path parts (`ConstantPathNode`): parent and name.
+    fn constant_path_parts(&self) -> Option<(Option<Self>, Vec<u8>)> {
+        None
+    }
+
+    /// Raw positional arguments (`ArgumentsNode`) including splats and
+    /// keyword hashes; also forwarding forms.
+    fn raw_call_args(&self) -> Option<Vec<Self>> {
+        None
+    }
+
+    /// Raw array elements (`ArrayNode`) including splats.
+    fn raw_array_elements(&self) -> Option<Vec<Self>> {
+        None
     }
 }

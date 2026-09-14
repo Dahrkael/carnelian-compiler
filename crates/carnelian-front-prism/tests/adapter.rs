@@ -236,6 +236,60 @@ fn begin_accessors_cover_rescue_else_ensure() {
 }
 
 #[test]
+fn alias_and_undef_accessors_cover_names() {
+    let parsed = parse(b"alias bar foo\n");
+    let node = first_statement(&parsed);
+    assert_eq!(node.kind_name(), "AliasMethodNode");
+    let (new_name, old_name) = node.alias_pair().expect("alias pair");
+    assert_eq!(new_name.kind_name(), "SymbolNode");
+    assert_eq!(old_name.kind_name(), "SymbolNode");
+    assert_eq!(new_name.symbol_lit().expect("new"), b"bar");
+    assert_eq!(old_name.symbol_lit().expect("old"), b"foo");
+    assert!(node.undef_list().is_none());
+
+    let parsed = parse(b"undef foo, :bar\n");
+    let node = first_statement(&parsed);
+    assert_eq!(node.kind_name(), "UndefNode");
+    let names = node.undef_list().expect("undef names");
+    assert_eq!(names.len(), 2);
+    assert_eq!(names[0].symbol_lit().expect("first"), b"foo");
+    assert_eq!(names[1].symbol_lit().expect("second"), b"bar");
+    assert!(node.alias_pair().is_none());
+}
+
+#[test]
+fn defined_operand_and_variable_accessors() {
+    let parsed = parse(b"defined?(x)\n");
+    let node = first_statement(&parsed);
+    assert_eq!(node.kind_name(), "DefinedNode");
+    let value = node.defined_value().expect("defined value");
+    assert_eq!(value.kind_name(), "CallNode");
+    assert!(value.implicit_value().is_none());
+
+    let parsed = parse(b"x = 1\ndefined?(x)\n");
+    let root = parsed.root();
+    let statements = root.program().expect("program").body.statements().unwrap();
+    let node = &statements[1];
+    assert_eq!(
+        node.defined_value().expect("defined value").kind_name(),
+        "LocalVariableReadNode"
+    );
+
+    let parsed = parse(b"((x))\n");
+    let node = first_statement(&parsed);
+    assert_eq!(node.kind_name(), "ParenthesesNode");
+    let body = node.parentheses_body().expect("parens").expect("body");
+    assert_eq!(body.kind_name(), "StatementsNode");
+
+    let parsed = parse(b"begin\nx\nend\n");
+    let node = first_statement(&parsed);
+    assert_eq!(node.kind_name(), "BeginNode");
+    let view = node.begin_view().expect("begin");
+    assert!(view.bare);
+    assert_eq!(view.statements.as_ref().map(Vec::len), Some(1));
+}
+
+#[test]
 fn begin_accessors_distinguish_bare_and_typed() {
     let parsed = parse(b"begin\n  1\nend\n");
     let node = first_statement(&parsed);
@@ -312,4 +366,58 @@ fn array_elements_include_splats() {
     let elements = node.array_elements().expect("elements");
     assert_eq!(elements.len(), 2);
     assert_eq!(elements[1].kind_name(), "SplatNode");
+}
+
+#[test]
+fn defined_name_and_raw_list_accessors() {
+    let parsed = parse(b"@x\n");
+    assert_eq!(
+        first_statement(&parsed)
+            .instance_var_read_name()
+            .expect("ivar"),
+        b"@x"
+    );
+    let parsed = parse(b"$x\n");
+    assert_eq!(
+        first_statement(&parsed)
+            .global_var_read_name()
+            .expect("gvar"),
+        b"$x"
+    );
+    let parsed = parse(b"@@x\n");
+    assert_eq!(
+        first_statement(&parsed)
+            .class_var_read_name()
+            .expect("cvar"),
+        b"@@x"
+    );
+    let parsed = parse(b"A\n");
+    assert_eq!(
+        first_statement(&parsed)
+            .constant_read_name()
+            .expect("const"),
+        b"A"
+    );
+
+    let parsed = parse(b"A::B\n");
+    let node = first_statement(&parsed);
+    assert_eq!(node.kind_name(), "ConstantPathNode");
+    let (parent, name) = node.constant_path_parts().expect("path");
+    assert_eq!(parent.expect("parent").kind_name(), "ConstantReadNode");
+    assert_eq!(name, b"B");
+
+    let parsed = parse(b"foo(1, *a)\n");
+    let node = first_statement(&parsed);
+    let args = node.call().expect("call").args.expect("args");
+    let raw = args.raw_call_args().expect("raw args");
+    assert_eq!(raw.len(), 2);
+    assert_eq!(raw[0].kind_name(), "IntegerNode");
+    assert_eq!(raw[1].kind_name(), "SplatNode");
+
+    let parsed = parse(b"[1, *a]\n");
+    let node = first_statement(&parsed);
+    let raw = node.raw_array_elements().expect("raw elements");
+    assert_eq!(raw.len(), 2);
+    assert_eq!(raw[1].kind_name(), "SplatNode");
+    assert_eq!(node.array_elements().expect("elements").len(), 2);
 }

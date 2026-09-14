@@ -594,6 +594,9 @@ impl BackendNode for PrismNode<'_> {
             statements: node
                 .statements()
                 .map(|statements| wrap_many(statements.body())),
+            bare: node.rescue_clause().is_none()
+                && node.else_clause().is_none()
+                && node.ensure_clause().is_none(),
             rescue_clause: node.rescue_clause().map(|clause| wrap(clause.as_node())),
             else_clause: node.else_clause().map(|clause| wrap(clause.as_node())),
             ensure_clause: node.ensure_clause().map(|clause| wrap(clause.as_node())),
@@ -646,5 +649,68 @@ impl BackendNode for PrismNode<'_> {
             rest: node.rest().map(wrap),
             rights: wrap_many(node.rights()),
         })
+    }
+
+    fn alias_pair(&self) -> Option<(Self, Self)> {
+        let node = self.inner.as_alias_method_node()?;
+        Some((wrap(node.new_name()), wrap(node.old_name())))
+    }
+
+    fn undef_list(&self) -> Option<Vec<Self>> {
+        let node = self.inner.as_undef_node()?;
+        Some(wrap_many(node.names()))
+    }
+
+    fn defined_value(&self) -> Option<Self> {
+        let node = self.inner.as_defined_node()?;
+        Some(wrap(node.value()))
+    }
+
+    fn implicit_value(&self) -> Option<Self> {
+        let node = self.inner.as_implicit_node()?;
+        Some(wrap(node.value()))
+    }
+
+    fn parentheses_body(&self) -> Option<Option<Self>> {
+        let node = self.inner.as_parentheses_node()?;
+        Some(node.body().map(wrap))
+    }
+
+    fn instance_var_read_name(&self) -> Option<Vec<u8>> {
+        let node = self.inner.as_instance_variable_read_node()?;
+        Some(const_bytes(node.name()))
+    }
+
+    fn global_var_read_name(&self) -> Option<Vec<u8>> {
+        let node = self.inner.as_global_variable_read_node()?;
+        Some(const_bytes(node.name()))
+    }
+
+    fn class_var_read_name(&self) -> Option<Vec<u8>> {
+        let node = self.inner.as_class_variable_read_node()?;
+        Some(const_bytes(node.name()))
+    }
+
+    fn constant_read_name(&self) -> Option<Vec<u8>> {
+        let node = self.inner.as_constant_read_node()?;
+        Some(const_bytes(node.name()))
+    }
+
+    fn constant_path_parts(&self) -> Option<(Option<Self>, Vec<u8>)> {
+        let node = self.inner.as_constant_path_node()?;
+        Some((
+            node.parent().map(wrap),
+            node.name().map(const_bytes).unwrap_or_default(),
+        ))
+    }
+
+    fn raw_call_args(&self) -> Option<Vec<Self>> {
+        let node = self.inner.as_arguments_node()?;
+        Some(node.arguments().iter().map(wrap).collect())
+    }
+
+    fn raw_array_elements(&self) -> Option<Vec<Self>> {
+        let node = self.inner.as_array_node()?;
+        Some(node.elements().iter().map(wrap).collect())
     }
 }
