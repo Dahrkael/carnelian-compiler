@@ -2,6 +2,7 @@
 members = [
     "crates/carnelian-ast",
     "crates/carnelian-compiler",
+    "crates/carnelian-front-prism",
     "crates/carnelian-cli",
 ]
 resolver = "2"
@@ -14,3 +15,4 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 carnelian-ast = { path = "crates/carnelian-ast" }
 carnelian-compiler = { path = "crates/carnelian-compiler" }
+carnelian-front-prism = { path = "crates/carnelian-front-prism" }
