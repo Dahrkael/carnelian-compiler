@@ -17,6 +17,8 @@ use crate::CompileOptions;
 const CALL_ARG_LIMIT: usize = 14;
 const LIT_ARY_MAX: usize = 64;
 const VAL_STACK_MAX: u32 = 99;
+/// `CALL_MAXARGS` (splat/array marker for calls and `super`).
+const CALL_MAXARGS: i32 = 15;
 /// Stack threshold before flushing pending hash pairs: `GEN_VAL_STACK_MAX`,
 /// lifted past `INT16_MAX` once the cursor itself is past the small limit
 /// (kept separate so the future `gen_values` flush can share it).
@@ -49,6 +51,59 @@ fn pair_pop(len: i32, extra: u16) -> Result<u16, Diagnostic> {
         .ok_or_else(too_complex)
 }
 
+/// Required-argument `aspec` (`MRC_ARGS_REQ`).
+fn args_req(count: usize) -> u32 {
+    ((count as u32) & 0x1f) << 18
+}
+
+/// Method `ainfo` for required-only parameters.
+fn ainfo_req(count: usize) -> u16 {
+    (((count as u32) & 0x3f) << 7) as u16
+}
+
+/// Forwarding operand for `ARGARY`/`BLKPUSH` (`mscope_operand`).
+fn mscope_operand(ainfo: u16, level: u32) -> Result<u16, Diagnostic> {
+    if u32::from(ainfo) > 0xfff {
+        return Err(Diagnostic {
+            message: "too many formal arguments".to_owned(),
+            start: 0,
+            end: 0,
+        });
+    }
+    if level > 0xf {
+        return Err(Diagnostic {
+            message: "too many nested blocks/methods".to_owned(),
+            start: 0,
+            end: 0,
+        });
+    }
+    Ok((ainfo << 4) | level as u16)
+}
+
+/// Method local in `reg` into the cursor (`gen_mscope_lvar`).
+fn gen_mscope_lvar(cg: &mut Codegen, reg: u16, level: u32) -> Result<(), Diagnostic> {
+    if level == 0 {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.gen_move(session, dst, reg, false)?;
+    } else {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        let depth = u8::try_from(level - 1).map_err(|_| too_complex())?;
+        scope.genop_3(session, opcode::OP_GETUPVAR, dst, reg, depth)?;
+    }
+    cg.current().1.push_n(1)
+}
+
+/// Block slot of the method scope (`gen_blkmove`).
+fn gen_blkmove(cg: &mut Codegen, ainfo: u16, level: u32) -> Result<(), Diagnostic> {
+    let ainfo = u32::from(ainfo);
+    let reg =
+        (((ainfo >> 7) & 0x3f) + ((ainfo >> 6) & 0x1) + ((ainfo >> 1) & 0x1f) + (ainfo & 0x1) + 1)
+            as u16;
+    gen_mscope_lvar(cg, reg, level)
+}
+
 /// Scopes stack plus session and finished root.
 pub struct Codegen {
     session: Session,
@@ -78,6 +133,46 @@ impl Codegen {
         let child = Scope::child(&mut self.session, self.scopes.last().expect("top"), locals)?;
         self.scopes.push(child);
         Ok(())
+    }
+
+    /// Open a method scope over `locals` with `OP_ENTER` (`lambda_body`).
+    pub fn push_method_body(
+        &mut self,
+        locals: &[Vec<u8>],
+        ainfo: u16,
+        aspec: u32,
+    ) -> Result<(), Diagnostic> {
+        let mut child = Scope::child(&mut self.session, self.scopes.last().expect("top"), locals)?;
+        child.ainfo = ainfo;
+        child.aspec = aspec;
+        child.mscope = true;
+        child.genop_w(opcode::OP_ENTER, aspec)?;
+        self.scopes.push(child);
+        Ok(())
+    }
+
+    /// Nearest method scope for `super` (`search_mscope` without `eval`).
+    /// Returns `ainfo` (`-1` with no method), levels between, and `aspec`.
+    pub fn method_scope(&self) -> (i32, u32, u32) {
+        let mut level: u32 = 0;
+        let mut index = self.scopes.len();
+        while index > 0 {
+            index -= 1;
+            let scope = &self.scopes[index];
+            if scope.is_top {
+                break;
+            }
+            if scope.mscope {
+                return (i32::from(scope.ainfo), level, scope.aspec);
+            }
+            // The dummy top scope stands for no frame; anything past it has
+            // no method to belong to.
+            if index == 0 {
+                break;
+            }
+            level += 1;
+        }
+        (-1, level, 0)
     }
 
     /// Attach the finished scope to its parent, or store the root.
@@ -209,6 +304,22 @@ pub fn codegen<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(
         "LocalVariableReadNode" => gen_lvar_read(cg, node, val),
         "LocalVariableWriteNode" => gen_lvar_write(cg, node, val),
         "TrueNode" | "FalseNode" | "NilNode" | "SelfNode" => gen_simple(cg, node, val),
+        "DefNode" => gen_def(cg, node, val),
+        "ClassNode" => gen_class(cg, node, val),
+        "ModuleNode" => gen_module(cg, node, val),
+        "SingletonClassNode" => gen_sclass(cg, node, val),
+        "ConstantReadNode" => gen_const_read(cg, node, val),
+        "ConstantWriteNode" => gen_const_write(cg, node, val),
+        "ConstantPathNode" => gen_const_path_read(cg, node, val),
+        "ConstantPathWriteNode" => gen_const_path_write(cg, node, val),
+        "InstanceVariableReadNode" => gen_ivar_read(cg, node, val),
+        "InstanceVariableWriteNode" => gen_ivar_write(cg, node, val),
+        "ClassVariableReadNode" => gen_cvar_read(cg, node, val),
+        "ClassVariableWriteNode" => gen_cvar_write(cg, node, val),
+        "GlobalVariableReadNode" => gen_gvar_read(cg, node, val),
+        "GlobalVariableWriteNode" => gen_gvar_write(cg, node, val),
+        "SuperNode" => gen_super(cg, node, val),
+        "ForwardingSuperNode" => gen_zsuper(cg, node, val),
         _ => Err(unsupported(&node, "node")),
     }
 }
@@ -1211,6 +1322,554 @@ fn gen_logic<N: BackendNode>(
     codegen(cg, right, val)?;
     let (_, scope) = cg.current();
     scope.dispatch(pos)?;
+    Ok(())
+}
+
+/// Method definition (`PM_DEF_NODE`, endless defs share the node).
+/// Only required positional parameters are covered; the accessor gates
+/// optional/rest/keyword/block forms (`lambda_body` `blk=0` slice).
+fn gen_def<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(view) = node.def_view() else {
+        return Err(unsupported(&node, "method parameters"));
+    };
+    if view.required_params.len() > 0x1f {
+        return Err(Diagnostic {
+            message: "too many formal arguments".to_owned(),
+            start: 0,
+            end: 0,
+        });
+    }
+    // Locals layout mirrors `lambda_body`: parameters, a null slot, then
+    // the remaining body locals in order.
+    let mut locals = view.required_params.clone();
+    locals.push(Vec::new());
+    for name in &view.locals {
+        if !locals.contains(name) {
+            locals.push(name.clone());
+        }
+    }
+    let count = view.required_params.len();
+    cg.push_method_body(&locals, ainfo_req(count), args_req(count))?;
+    match view.body {
+        Some(body) => codegen(cg, body, true)?,
+        None => emit_absent_else(cg)?,
+    }
+    {
+        let (session, scope) = cg.current();
+        scope.pop_n(1)?;
+        let ret = scope.cursp();
+        scope.gen_return(session, opcode::OP_RETURN, ret)?;
+    }
+    let idx = cg.pop_scope()?;
+    let sym = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, &view.name)?
+    };
+    match view.receiver {
+        None => {
+            if idx <= 0xff {
+                let (session, scope) = cg.current();
+                let dst = scope.cursp();
+                scope.genop_3(session, opcode::OP_TDEF, dst, sym, idx as u8)?;
+            } else {
+                let (session, scope) = cg.current();
+                let dst = scope.cursp();
+                scope.genop_1(session, opcode::OP_TCLASS, dst)?;
+                scope.push_n(1)?;
+                let dst = scope.cursp();
+                scope.genop_2(session, opcode::OP_METHOD, dst, idx as u16)?;
+                scope.push_n(1)?;
+                scope.pop_n(1)?;
+                scope.pop_n(1)?;
+                let dst = scope.cursp();
+                scope.genop_2(session, opcode::OP_DEF, dst, sym)?;
+            }
+        }
+        Some(receiver) => {
+            codegen(cg, receiver, true)?;
+            cg.current().1.pop_n(1)?;
+            if idx <= 0xff {
+                let (session, scope) = cg.current();
+                let dst = scope.cursp();
+                scope.genop_3(session, opcode::OP_SDEF, dst, sym, idx as u8)?;
+            } else {
+                let (session, scope) = cg.current();
+                let dst = scope.cursp();
+                scope.genop_1(session, opcode::OP_SCLASS, dst)?;
+                scope.push_n(1)?;
+                let dst = scope.cursp();
+                scope.genop_2(session, opcode::OP_METHOD, dst, idx as u16)?;
+                scope.push_n(1)?;
+                scope.pop_n(1)?;
+                scope.pop_n(1)?;
+                let dst = scope.cursp();
+                scope.genop_2(session, opcode::OP_DEF, dst, sym)?;
+            }
+        }
+    }
+    if val {
+        cg.current().1.push_n(1)?;
+    }
+    Ok(())
+}
+
+/// Class definition (`PM_CLASS_NODE` with `scope_body` for the body).
+fn gen_class<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(view) = node.class_view() else {
+        return Err(unsupported(&node, "class path"));
+    };
+    if view.cpath_is_read {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+        scope.push_n(1)?;
+    } else {
+        match view.cpath_parent {
+            Some(parent) => codegen(cg, parent, true)?,
+            None => {
+                let (session, scope) = cg.current();
+                let dst = scope.cursp();
+                scope.genop_1(session, opcode::OP_OCLASS, dst)?;
+                scope.push_n(1)?;
+            }
+        }
+    }
+    match view.superclass {
+        Some(superclass) => codegen(cg, superclass, true)?,
+        None => {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+            scope.push_n(1)?;
+        }
+    }
+    cg.current().1.pop_n(2)?;
+    let sym = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, &view.name)?
+    };
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_CLASS, dst, sym)?;
+    }
+    match view.body {
+        None => {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+        }
+        Some(body) => {
+            cg.push_body(&view.locals)?;
+            codegen(cg, body, true)?;
+            {
+                let (session, scope) = cg.current();
+                let ret = scope.sp - 1;
+                scope.gen_return(session, opcode::OP_RETURN, ret)?;
+            }
+            let idx = cg.pop_scope()?;
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_2(session, opcode::OP_EXEC, dst, idx as u16)?;
+        }
+    }
+    if val {
+        cg.current().1.push_n(1)?;
+    }
+    Ok(())
+}
+
+/// Module definition (`PM_MODULE_NODE`).
+fn gen_module<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(view) = node.module_view() else {
+        return Err(unsupported(&node, "module path"));
+    };
+    if view.cpath_is_read {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+        scope.push_n(1)?;
+    } else {
+        match view.cpath_parent {
+            Some(parent) => codegen(cg, parent, true)?,
+            None => {
+                let (session, scope) = cg.current();
+                let dst = scope.cursp();
+                scope.genop_1(session, opcode::OP_OCLASS, dst)?;
+                scope.push_n(1)?;
+            }
+        }
+    }
+    cg.current().1.pop_n(1)?;
+    let sym = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, &view.name)?
+    };
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_MODULE, dst, sym)?;
+    }
+    match view.body {
+        None => {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+        }
+        Some(body) => {
+            cg.push_body(&view.locals)?;
+            codegen(cg, body, true)?;
+            {
+                let (session, scope) = cg.current();
+                let ret = scope.sp - 1;
+                scope.gen_return(session, opcode::OP_RETURN, ret)?;
+            }
+            let idx = cg.pop_scope()?;
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_2(session, opcode::OP_EXEC, dst, idx as u16)?;
+        }
+    }
+    if val {
+        cg.current().1.push_n(1)?;
+    }
+    Ok(())
+}
+
+/// Singleton class (`PM_SINGLETON_CLASS_NODE`).
+fn gen_sclass<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(view) = node.sclass_view() else {
+        return Err(unsupported(&node, "singleton class"));
+    };
+    codegen(cg, view.expression, true)?;
+    cg.current().1.pop_n(1)?;
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_1(session, opcode::OP_SCLASS, dst)?;
+    }
+    match view.body {
+        None => {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+        }
+        Some(body) => {
+            cg.push_body(&view.locals)?;
+            codegen(cg, body, true)?;
+            {
+                let (session, scope) = cg.current();
+                let ret = scope.sp - 1;
+                scope.gen_return(session, opcode::OP_RETURN, ret)?;
+            }
+            let idx = cg.pop_scope()?;
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_2(session, opcode::OP_EXEC, dst, idx as u16)?;
+        }
+    }
+    if val {
+        cg.current().1.push_n(1)?;
+    }
+    Ok(())
+}
+
+/// Constant read (`PM_CONSTANT_READ_NODE`).
+fn gen_const_read<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(name) = node.const_read() else {
+        return Err(unsupported(&node, "constant read"));
+    };
+    let sym = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, &name)?
+    };
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_GETCONST, dst, sym)?;
+    }
+    if val {
+        cg.current().1.push_n(1)?;
+    }
+    Ok(())
+}
+
+/// Plain constant or variable store shared by `=` writes (`gen_assignment`
+/// tail with `gen_setxv` plus the valued push).
+fn gen_plain_store(cg: &mut Codegen, op: u8, name: &[u8], val: bool) -> Result<(), Diagnostic> {
+    let sp = cg.current().1.cursp();
+    {
+        let (session, scope) = cg.current();
+        scope.gen_setxv(session, op, sp, name, val)?;
+    }
+    if val {
+        cg.current().1.push_n(1)?;
+    }
+    Ok(())
+}
+
+/// Constant write (`PM_CONSTANT_WRITE_NODE`).
+fn gen_const_write<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(write) = node.const_write() else {
+        return Err(unsupported(&node, "constant write"));
+    };
+    codegen(cg, write.value, true)?;
+    cg.current().1.pop_n(1)?;
+    gen_plain_store(cg, opcode::OP_SETCONST, &write.name, val)
+}
+
+/// Constant path read (`PM_CONSTANT_PATH_NODE`).
+fn gen_const_path_read<N: BackendNode>(
+    cg: &mut Codegen,
+    node: N,
+    val: bool,
+) -> Result<(), Diagnostic> {
+    let Some(path) = node.const_path() else {
+        return Err(unsupported(&node, "constant path"));
+    };
+    let sym = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, &path.name)?
+    };
+    match path.parent {
+        Some(parent) => {
+            codegen(cg, parent, true)?;
+            cg.current().1.pop_n(1)?;
+        }
+        None => {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_1(session, opcode::OP_OCLASS, dst)?;
+        }
+    }
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_GETMCNST, dst, sym)?;
+    }
+    if val {
+        cg.current().1.push_n(1)?;
+    }
+    Ok(())
+}
+
+/// Constant path write (`PM_CONSTANT_PATH_WRITE_NODE`).
+fn gen_const_path_write<N: BackendNode>(
+    cg: &mut Codegen,
+    node: N,
+    val: bool,
+) -> Result<(), Diagnostic> {
+    let Some(write) = node.const_path_write() else {
+        return Err(unsupported(&node, "constant path write"));
+    };
+    let base = cg.current().1.cursp();
+    cg.current().1.push_n(1)?;
+    let sym = match write.parent {
+        Some(parent) => {
+            codegen(cg, parent, true)?;
+            let (session, scope) = cg.current();
+            scope.new_sym(session, &write.name)?
+        }
+        None => {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_1(session, opcode::OP_OCLASS, dst)?;
+            scope.push_n(1)?;
+            let (session, scope) = cg.current();
+            scope.new_sym(session, &write.name)?
+        }
+    };
+    codegen(cg, write.value, true)?;
+    {
+        let (session, scope) = cg.current();
+        scope.pop_n(1)?;
+        let src = scope.cursp();
+        scope.gen_move(session, base, src, false)?;
+        scope.pop_n(2)?;
+        scope.genop_2(session, opcode::OP_SETMCNST, base, sym)?;
+    }
+    if val {
+        cg.current().1.push_n(1)?;
+    }
+    Ok(())
+}
+
+/// Instance variable read (`PM_INSTANCE_VARIABLE_READ_NODE`).
+fn gen_ivar_read<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(name) = node.ivar_read() else {
+        return Err(unsupported(&node, "instance variable read"));
+    };
+    let sym = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, &name)?
+    };
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_GETIV, dst, sym)?;
+    }
+    if val {
+        cg.current().1.push_n(1)?;
+    }
+    Ok(())
+}
+
+/// Instance variable write (`PM_INSTANCE_VARIABLE_WRITE_NODE`).
+fn gen_ivar_write<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(write) = node.ivar_write() else {
+        return Err(unsupported(&node, "instance variable write"));
+    };
+    codegen(cg, write.value, true)?;
+    cg.current().1.pop_n(1)?;
+    gen_plain_store(cg, opcode::OP_SETIV, &write.name, val)
+}
+
+/// Class variable read (`PM_CLASS_VARIABLE_READ_NODE`).
+fn gen_cvar_read<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(name) = node.cvar_read() else {
+        return Err(unsupported(&node, "class variable read"));
+    };
+    let sym = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, &name)?
+    };
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_GETCV, dst, sym)?;
+    }
+    if val {
+        cg.current().1.push_n(1)?;
+    }
+    Ok(())
+}
+
+/// Class variable write (`PM_CLASS_VARIABLE_WRITE_NODE`).
+fn gen_cvar_write<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(write) = node.cvar_write() else {
+        return Err(unsupported(&node, "class variable write"));
+    };
+    codegen(cg, write.value, true)?;
+    cg.current().1.pop_n(1)?;
+    gen_plain_store(cg, opcode::OP_SETCV, &write.name, val)
+}
+
+/// Global variable read (`PM_GLOBAL_VARIABLE_READ_NODE`).
+fn gen_gvar_read<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(name) = node.gvar_read() else {
+        return Err(unsupported(&node, "global variable read"));
+    };
+    let sym = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, &name)?
+    };
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_GETGV, dst, sym)?;
+    }
+    if val {
+        cg.current().1.push_n(1)?;
+    }
+    Ok(())
+}
+
+/// Global variable write (`PM_GLOBAL_VARIABLE_WRITE_NODE`).
+fn gen_gvar_write<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(write) = node.gvar_write() else {
+        return Err(unsupported(&node, "global variable write"));
+    };
+    codegen(cg, write.value, true)?;
+    cg.current().1.pop_n(1)?;
+    gen_plain_store(cg, opcode::OP_SETGV, &write.name, val)
+}
+
+/// Explicit `super` with plain arguments (`PM_SUPER_NODE`).
+fn gen_super<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(view) = node.super_view() else {
+        return Err(unsupported(&node, "super arguments"));
+    };
+    let (ainfo, level, _) = cg.method_scope();
+    cg.current().1.push_n(1)?;
+    let mut count: i32 = 0;
+    let mut stacked: i32 = 0;
+    if let Some(args) = view.args {
+        let arg_count = gen_values(cg, args, true, CALL_ARG_LIMIT)?;
+        if arg_count < 0 {
+            stacked = 1;
+            count = CALL_MAXARGS;
+            cg.current().1.push_n(1)?;
+        } else {
+            stacked = arg_count;
+            count = arg_count;
+        }
+    }
+    if ainfo >= 0 {
+        gen_blkmove(cg, ainfo as u16, level)?;
+    } else {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+        scope.push_n(1)?;
+    }
+    stacked += 1;
+    cg.current().1.pop_n((stacked + 1) as u16)?;
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_SUPER, dst, count as u16)?;
+    }
+    if val {
+        cg.current().1.push_n(1)?;
+    }
+    Ok(())
+}
+
+/// Bare `super` forwarding the method arguments (`PM_FORWARDING_SUPER_NODE`).
+/// Keyword-bearing methods need `gen_zsuper_kwargs` and stay gated.
+fn gen_zsuper<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(block) = node.forwarding_super() else {
+        return Err(unsupported(&node, "super"));
+    };
+    if block.is_some() {
+        return Err(unsupported(&node, "block argument"));
+    }
+    let (ainfo, level, _) = cg.method_scope();
+    let saved = cg.current().1.cursp();
+    cg.current().1.push_n(1)?;
+    let count: i32 = if ainfo > 0 {
+        if (ainfo as u16 & 0x1) != 0 {
+            return Err(unsupported(&node, "keyword forwarding"));
+        }
+        let operand = mscope_operand(ainfo as u16, level)?;
+        {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_2s(session, opcode::OP_ARGARY, dst, operand)?;
+            scope.push_n(3)?;
+            scope.pop_n(3)?;
+        }
+        CALL_MAXARGS
+    } else {
+        if ainfo >= 0 {
+            gen_blkmove(cg, ainfo as u16, level)?;
+        } else {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+            scope.push_n(1)?;
+        }
+        0
+    };
+    cg.current().1.sp = saved;
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_SUPER, dst, count as u16)?;
+    }
+    if val {
+        cg.current().1.push_n(1)?;
+    }
     Ok(())
 }
 

@@ -101,6 +101,12 @@ pub struct Scope {
     pub nregs: u16,
     /// `for` scopes above (upvar depth adjustment).
     pub for_depth: u16,
+    /// Argument layout for `super`/`yield` forwarding (`ainfo`, 15 bits).
+    pub ainfo: u16,
+    /// `OP_ENTER` operand of this scope (`aspec`).
+    pub aspec: u32,
+    /// True for method scopes (`mscope`, the `super` search target).
+    pub mscope: bool,
     /// True for the dummy top scope created by `generate_code`.
     pub is_top: bool,
 }
@@ -163,6 +169,9 @@ impl Scope {
             nlocals: 0,
             nregs: 0,
             for_depth: 0,
+            ainfo: 0,
+            aspec: 0,
+            mscope: false,
             is_top: true,
         }
     }
@@ -197,6 +206,9 @@ impl Scope {
             nlocals: 0,
             nregs: 0,
             for_depth: 0,
+            ainfo: 0,
+            aspec: 0,
+            mscope: false,
             is_top: false,
         };
         scope.sp = locals.len() as u16 + 1; // add self
@@ -933,6 +945,26 @@ impl Scope {
         }
         self.syms.push(id);
         Ok((self.syms.len() - 1) as u16)
+    }
+
+    /// Variable/constant store with `MOVE` folding (`gen_setxv`).
+    pub fn gen_setxv(
+        &mut self,
+        session: &mut Session,
+        op: u8,
+        mut dst: u16,
+        name: &[u8],
+        val: bool,
+    ) -> Result<(), Diagnostic> {
+        let idx = self.new_sym(session, name)?;
+        if !val && !self.no_peephole(session) {
+            let data = self.last_insn();
+            if data.insn == opcode::OP_MOVE && data.a == u32::from(dst) {
+                dst = data.b;
+                self.pc = self.lastpc;
+            }
+        }
+        self.genop_2(session, op, dst, idx)
     }
 
     /// Reserve a catch handler slot (`catch_handler_new`).

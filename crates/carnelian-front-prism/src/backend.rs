@@ -1,8 +1,9 @@
 //! `BackendNode` for borrowed nodes (thin access, no tree copies).
 
 use carnelian_ast::view::{
-    BackendNode, CallView, CaseView, IfView, IntegerLit, LvarRef, LvarWrite, ProgramView,
-    SimpleLit, WhenView, WhileView,
+    BackendNode, CallView, CaseView, ClassView, ConstPathRead, ConstPathWrite, DefView, IfView,
+    IntegerLit, LvarRef, LvarWrite, ModuleView, ProgramView, SclassView, SimpleLit, SuperView,
+    VarWrite, WhenView, WhileView,
 };
 use carnelian_ast::AstNode;
 
@@ -301,5 +302,209 @@ impl BackendNode for PrismNode<'_> {
     fn embedded_var(&self) -> Option<Self> {
         let node = self.inner.as_embedded_variable_node()?;
         Some(wrap(node.variable()))
+    }
+
+    fn def_view(&self) -> Option<DefView<Self>> {
+        let node = self.inner.as_def_node()?;
+        let mut required_params = Vec::new();
+        if let Some(params) = node.parameters() {
+            if !params.optionals().is_empty() {
+                return None;
+            }
+            if params.rest().is_some() {
+                return None;
+            }
+            if !params.posts().is_empty() {
+                return None;
+            }
+            if !params.keywords().is_empty() {
+                return None;
+            }
+            if params.keyword_rest().is_some() {
+                return None;
+            }
+            if params.block().is_some() {
+                return None;
+            }
+            for argument in params.requireds().iter() {
+                let child = wrap(argument);
+                let param = child.inner.as_required_parameter_node()?;
+                required_params.push(const_bytes(param.name()));
+            }
+        }
+        Some(DefView {
+            name: const_bytes(node.name()),
+            receiver: node.receiver().map(wrap),
+            required_params,
+            body: node.body().map(wrap),
+            locals: node
+                .locals()
+                .iter()
+                .map(|id| id.as_slice().to_vec())
+                .collect(),
+        })
+    }
+
+    fn class_view(&self) -> Option<ClassView<Self>> {
+        let node = self.inner.as_class_node()?;
+        let raw_path = node.constant_path();
+        let path = wrap(raw_path);
+        let (cpath_is_read, cpath_parent) = if path.kind_name() == "ConstantReadNode" {
+            (true, None)
+        } else if path.kind_name() == "ConstantPathNode" {
+            let path_node = path.inner.as_constant_path_node()?;
+            path_node.name()?;
+            (false, path_node.parent().map(wrap))
+        } else {
+            return None;
+        };
+        Some(ClassView {
+            name: const_bytes(node.name()),
+            cpath_is_read,
+            cpath_parent,
+            superclass: node.superclass().map(wrap),
+            body: node.body().map(wrap),
+            locals: node
+                .locals()
+                .iter()
+                .map(|id| id.as_slice().to_vec())
+                .collect(),
+        })
+    }
+
+    fn module_view(&self) -> Option<ModuleView<Self>> {
+        let node = self.inner.as_module_node()?;
+        let raw_path = node.constant_path();
+        let path = wrap(raw_path);
+        let (cpath_is_read, cpath_parent) = if path.kind_name() == "ConstantReadNode" {
+            (true, None)
+        } else if path.kind_name() == "ConstantPathNode" {
+            let path_node = path.inner.as_constant_path_node()?;
+            path_node.name()?;
+            (false, path_node.parent().map(wrap))
+        } else {
+            return None;
+        };
+        Some(ModuleView {
+            name: const_bytes(node.name()),
+            cpath_is_read,
+            cpath_parent,
+            body: node.body().map(wrap),
+            locals: node
+                .locals()
+                .iter()
+                .map(|id| id.as_slice().to_vec())
+                .collect(),
+        })
+    }
+
+    fn sclass_view(&self) -> Option<SclassView<Self>> {
+        let node = self.inner.as_singleton_class_node()?;
+        Some(SclassView {
+            expression: wrap(node.expression()),
+            body: node.body().map(wrap),
+            locals: node
+                .locals()
+                .iter()
+                .map(|id| id.as_slice().to_vec())
+                .collect(),
+        })
+    }
+
+    fn const_read(&self) -> Option<Vec<u8>> {
+        let node = self.inner.as_constant_read_node()?;
+        Some(const_bytes(node.name()))
+    }
+
+    fn const_write(&self) -> Option<VarWrite<Self>> {
+        let node = self.inner.as_constant_write_node()?;
+        Some(VarWrite {
+            name: const_bytes(node.name()),
+            value: wrap(node.value()),
+        })
+    }
+
+    fn const_path(&self) -> Option<ConstPathRead<Self>> {
+        let node = self.inner.as_constant_path_node()?;
+        Some(ConstPathRead {
+            parent: node.parent().map(wrap),
+            name: const_bytes(node.name()?),
+        })
+    }
+
+    fn const_path_write(&self) -> Option<ConstPathWrite<Self>> {
+        let node = self.inner.as_constant_path_write_node()?;
+        let target = node.target();
+        Some(ConstPathWrite {
+            parent: target.parent().map(wrap),
+            name: const_bytes(target.name()?),
+            value: wrap(node.value()),
+        })
+    }
+
+    fn ivar_read(&self) -> Option<Vec<u8>> {
+        let node = self.inner.as_instance_variable_read_node()?;
+        Some(const_bytes(node.name()))
+    }
+
+    fn ivar_write(&self) -> Option<VarWrite<Self>> {
+        let node = self.inner.as_instance_variable_write_node()?;
+        Some(VarWrite {
+            name: const_bytes(node.name()),
+            value: wrap(node.value()),
+        })
+    }
+
+    fn cvar_read(&self) -> Option<Vec<u8>> {
+        let node = self.inner.as_class_variable_read_node()?;
+        Some(const_bytes(node.name()))
+    }
+
+    fn cvar_write(&self) -> Option<VarWrite<Self>> {
+        let node = self.inner.as_class_variable_write_node()?;
+        Some(VarWrite {
+            name: const_bytes(node.name()),
+            value: wrap(node.value()),
+        })
+    }
+
+    fn gvar_read(&self) -> Option<Vec<u8>> {
+        let node = self.inner.as_global_variable_read_node()?;
+        Some(const_bytes(node.name()))
+    }
+
+    fn gvar_write(&self) -> Option<VarWrite<Self>> {
+        let node = self.inner.as_global_variable_write_node()?;
+        Some(VarWrite {
+            name: const_bytes(node.name()),
+            value: wrap(node.value()),
+        })
+    }
+
+    fn super_view(&self) -> Option<SuperView<Self>> {
+        let node = self.inner.as_super_node()?;
+        if node.block().is_some() {
+            return None;
+        }
+        let Some(arguments) = node.arguments() else {
+            return Some(SuperView { args: None });
+        };
+        let mut out = Vec::new();
+        for argument in arguments.arguments().iter() {
+            let child = wrap(argument);
+            if matches!(
+                child.kind_name(),
+                "SplatNode" | "KeywordHashNode" | "ForwardingArgumentsNode"
+            ) {
+                return None;
+            }
+            out.push(child);
+        }
+        Some(SuperView { args: Some(out) })
+    }
+
+    fn forwarding_super(&self) -> Option<Option<Self>> {
+        let node = self.inner.as_forwarding_super_node()?;
+        Some(node.block().map(|block| wrap(block.as_node())))
     }
 }

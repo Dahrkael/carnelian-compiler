@@ -135,3 +135,73 @@ fn interpolated_string_accessors_cover_parts() {
     assert_eq!(parts.len(), 1);
     assert!(parts[0].embedded_body().is_none());
 }
+
+#[test]
+fn def_accessor_covers_plain_and_gated_params() {
+    let parsed = parse(b"def foo(a, b)\n  a\nend\n");
+    let node = first_statement(&parsed);
+    assert_eq!(node.kind_name(), "DefNode");
+    let view = node.def_view().expect("def");
+    assert_eq!(view.name, b"foo");
+    assert!(view.receiver.is_none());
+    assert_eq!(view.required_params, vec![b"a".to_vec(), b"b".to_vec()]);
+    assert!(view.body.is_some());
+
+    // Optional parameters stay gated.
+    let parsed = parse(b"def foo(a = 1)\n  a\nend\n");
+    let node = first_statement(&parsed);
+    assert!(node.def_view().is_none());
+}
+
+#[test]
+fn class_module_sclass_accessors_cover_paths() {
+    let parsed = parse(b"class Foo\nend\n");
+    let node = first_statement(&parsed);
+    let view = node.class_view().expect("class");
+    assert_eq!(view.name, b"Foo");
+    assert!(view.cpath_is_read);
+    assert!(view.cpath_parent.is_none());
+    assert!(view.superclass.is_none());
+    assert!(view.body.is_none());
+
+    let parsed = parse(b"class Foo::Bar < Baz\nend\n");
+    let node = first_statement(&parsed);
+    let view = node.class_view().expect("scoped class");
+    assert!(!view.cpath_is_read);
+    assert!(view.cpath_parent.is_some());
+    assert!(view.superclass.is_some());
+
+    let parsed = parse(b"module Foo::Bar\nend\n");
+    let node = first_statement(&parsed);
+    let view = node.module_view().expect("scoped module");
+    assert!(!view.cpath_is_read);
+    assert!(view.cpath_parent.is_some());
+
+    let parsed = parse(b"class << self\nend\n");
+    let node = first_statement(&parsed);
+    let view = node.sclass_view().expect("sclass");
+    assert_eq!(view.expression.kind_name(), "SelfNode");
+    assert!(view.body.is_none());
+}
+
+#[test]
+fn variable_and_super_accessors_cover_plain_forms() {
+    let parsed = parse(b"@x = 1\n");
+    let node = first_statement(&parsed);
+    let write = node.ivar_write().expect("ivar write");
+    assert_eq!(write.name, b"@x");
+
+    let parsed = parse(b"@@x\n");
+    let node = first_statement(&parsed);
+    assert_eq!(node.cvar_read().expect("cvar"), b"@@x");
+
+    let parsed = parse(b"$x = 1\n");
+    let node = first_statement(&parsed);
+    assert!(node.gvar_write().is_some());
+
+    let parsed = parse(b"Foo::Bar\n");
+    let node = first_statement(&parsed);
+    let path = node.const_path().expect("path");
+    assert_eq!(path.name, b"Bar");
+    assert!(path.parent.is_some());
+}
