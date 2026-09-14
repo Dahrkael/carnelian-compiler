@@ -3,7 +3,7 @@
 //! Dispatch is on `kind_name` (1:1 with the C `switch` on node type); values
 //! travel through `BackendNode`, so FFI and owned frontends share handlers.
 
-use carnelian_ast::view::{BackendNode, LvarRef, SimpleLit};
+use carnelian_ast::view::{BackendNode, SimpleLit};
 
 use crate::codegen::{LoopType, Scope, Session, JMPLINK_START};
 use crate::diagnostics::{Diagnostic, Diagnostics};
@@ -91,6 +91,21 @@ fn pair_pop(len: i32, extra: u16) -> Result<u16, Diagnostic> {
 /// Required-argument `aspec` (`MRC_ARGS_REQ`).
 fn args_req(count: usize) -> u32 {
     ((count as u32) & 0x1f) << 18
+}
+
+/// Optional-argument `aspec` (`MRC_ARGS_OPT`).
+fn args_opt(count: usize) -> u32 {
+    ((count as u32) & 0x1f) << 13
+}
+
+/// Post-rest-argument `aspec` (`MRC_ARGS_POST`).
+fn args_post(count: usize) -> u32 {
+    ((count as u32) & 0x1f) << 7
+}
+
+/// Keyword-argument `aspec` (`MRC_ARGS_KEY(ka, kd)`).
+fn args_key(count: usize, with_rest: bool) -> u32 {
+    (((count as u32) & 0x1f) << 2) | u32::from(with_rest) << 1
 }
 
 /// Method `ainfo` for required-only parameters.
@@ -454,6 +469,8 @@ fn codegen_dispatch<N: BackendNode>(
         "ClassVariableWriteNode" => gen_cvar_write(cg, node, val),
         "GlobalVariableReadNode" => gen_gvar_read(cg, node, val),
         "GlobalVariableWriteNode" => gen_gvar_write(cg, node, val),
+        "BackReferenceReadNode" => gen_backref(cg, node, val),
+        "NumberedReferenceReadNode" => gen_numbered_ref(cg, node, val),
         "SuperNode" => gen_super(cg, node, val),
         "ForwardingSuperNode" => gen_zsuper(cg, node, val),
         "AliasMethodNode" => gen_alias(cg, node, val),
@@ -667,8 +684,9 @@ fn gen_assignment_lvar(
     }
 }
 
-/// Assignment to one target (`gen_assignment`): local writes/targets and
-/// nested multiple targets; other target kinds belong to later tranches.
+/// Assignment to one target (`gen_assignment`): like C, a value-carrying
+/// right-hand side evaluates first (constant paths evaluate theirs inside,
+/// after the parent), then each target kind stores from `sp`.
 fn gen_assignment<N: BackendNode>(
     cg: &mut Codegen,
     tree: N,
@@ -677,25 +695,105 @@ fn gen_assignment<N: BackendNode>(
     val: bool,
 ) -> Result<(), Diagnostic> {
     match tree.kind_name() {
-        "LocalVariableWriteNode" | "LocalVariableTargetNode" | "RequiredParameterNode" => {
+        // The pinned reference accepts constant path *writes* here but
+        // rejects *targets* (`Not implemented (#1)`), so targets stay
+        // gated: no golden can exist for them.
+        "ConstantPathWriteNode" => {
+            gen_const_path_target(cg, &tree, rhs, sp)?;
+            if val {
+                cg.current().1.push_n(1)?;
+            }
+            return Ok(());
+        }
+        "LocalVariableWriteNode"
+        | "LocalVariableTargetNode"
+        | "RequiredParameterNode"
+        | "InstanceVariableWriteNode"
+        | "InstanceVariableTargetNode"
+        | "ConstantWriteNode"
+        | "ConstantTargetNode"
+        | "GlobalVariableWriteNode"
+        | "GlobalVariableTargetNode"
+        | "ClassVariableWriteNode"
+        | "ClassVariableTargetNode"
+        | "MultiTargetNode"
+        | "IndexTargetNode"
+        | "CallTargetNode" => {
             if let Some(value) = rhs {
                 codegen(cg, value, true)?;
                 cg.current().1.pop_n(1)?;
                 sp = cg.current().1.cursp();
             }
-            let target = if tree.kind_name() == "LocalVariableWriteNode" {
-                tree.lvar_write().map(|write| LvarRef {
-                    name: write.name,
-                    depth: write.depth,
-                })
+        }
+        _ => return Err(unsupported(&tree, "assignment target")),
+    }
+    match tree.kind_name() {
+        "LocalVariableWriteNode" | "LocalVariableTargetNode" | "RequiredParameterNode" => {
+            // A parameter is always a local in the current scope: no `depth`
+            // field exists on the node, so the depth is `0` (C reads the
+            // sibling layout instead of the missing field for the same).
+            let (name, depth) = if tree.kind_name() == "LocalVariableWriteNode" {
+                let Some(write) = tree.lvar_write() else {
+                    return Err(unsupported(&tree, "assignment target"));
+                };
+                (write.name, write.depth)
+            } else if tree.kind_name() == "RequiredParameterNode" {
+                let Some(name) = tree.required_param_name() else {
+                    return Err(unsupported(&tree, "assignment target"));
+                };
+                (name, 0)
             } else {
-                tree.lvar_target()
+                let Some(target) = tree.lvar_target() else {
+                    return Err(unsupported(&tree, "assignment target"));
+                };
+                (target.name, target.depth)
             };
-            let Some(target) = target else {
+            let depth = depth + u32::from(cg.current().1.for_depth);
+            gen_assignment_lvar(cg, sp, &name, depth, val)?;
+        }
+        "InstanceVariableWriteNode" | "InstanceVariableTargetNode" => {
+            let Some(name) = either_target_name(
+                &tree,
+                tree.ivar_write().map(|write| write.name),
+                tree.ivar_target_name(),
+            ) else {
                 return Err(unsupported(&tree, "assignment target"));
             };
-            let depth = target.depth + u32::from(cg.current().1.for_depth);
-            gen_assignment_lvar(cg, sp, &target.name, depth, val)?;
+            let (session, scope) = cg.current();
+            scope.gen_setxv(session, opcode::OP_SETIV, sp, &name, val)?;
+        }
+        "ConstantWriteNode" | "ConstantTargetNode" => {
+            let Some(name) = either_target_name(
+                &tree,
+                tree.const_write().map(|write| write.name),
+                tree.const_target_name(),
+            ) else {
+                return Err(unsupported(&tree, "assignment target"));
+            };
+            let (session, scope) = cg.current();
+            scope.gen_setxv(session, opcode::OP_SETCONST, sp, &name, val)?;
+        }
+        "GlobalVariableWriteNode" | "GlobalVariableTargetNode" => {
+            let Some(name) = either_target_name(
+                &tree,
+                tree.gvar_write().map(|write| write.name),
+                tree.gvar_target_name(),
+            ) else {
+                return Err(unsupported(&tree, "assignment target"));
+            };
+            let (session, scope) = cg.current();
+            scope.gen_setxv(session, opcode::OP_SETGV, sp, &name, val)?;
+        }
+        "ClassVariableWriteNode" | "ClassVariableTargetNode" => {
+            let Some(name) = either_target_name(
+                &tree,
+                tree.cvar_write().map(|write| write.name),
+                tree.cvar_target_name(),
+            ) else {
+                return Err(unsupported(&tree, "assignment target"));
+            };
+            let (session, scope) = cg.current();
+            scope.gen_setxv(session, opcode::OP_SETCV, sp, &name, val)?;
         }
         "MultiTargetNode" => {
             let Some(view) = tree.multi_target_view() else {
@@ -703,11 +801,197 @@ fn gen_assignment<N: BackendNode>(
             };
             gen_massignment(cg, view.lefts, view.rest, view.rights, i32::from(sp), val)?;
         }
+        "IndexTargetNode" => {
+            gen_index_target(cg, &tree, sp)?;
+        }
+        "CallTargetNode" => {
+            gen_call_target(cg, &tree, sp)?;
+        }
         _ => return Err(unsupported(&tree, "assignment target")),
     }
     if val {
         cg.current().1.push_n(1)?;
     }
+    Ok(())
+}
+
+/// Name of a variable/constant target in either node form (a write's own
+/// value child is the caller's `sp` here, never read).
+fn either_target_name<N: BackendNode>(
+    tree: &N,
+    write_name: Option<Vec<u8>>,
+    target_name: Option<Vec<u8>>,
+) -> Option<Vec<u8>> {
+    if tree.kind_name().ends_with("WriteNode") {
+        write_name
+    } else {
+        target_name
+    }
+}
+
+/// Constant path target (`gen_assignment` path arm): the value in `sp`
+/// moves aside while the parent evaluates, then `OP_SETMCNST` stores it.
+fn gen_const_path_target<N: BackendNode>(
+    cg: &mut Codegen,
+    tree: &N,
+    rhs: Option<N>,
+    sp: u16,
+) -> Result<(), Diagnostic> {
+    let (parent, name) = if tree.kind_name() == "ConstantPathWriteNode" {
+        let Some(write) = tree.const_path_write() else {
+            return Err(unsupported(tree, "assignment target"));
+        };
+        (write.parent, write.name)
+    } else {
+        let Some((parent, name)) = tree.const_path_target() else {
+            return Err(unsupported(tree, "assignment target"));
+        };
+        (parent, name)
+    };
+    let mut sp = sp;
+    if sp != 0 {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.gen_move(session, dst, sp, false)?;
+    }
+    sp = cg.current().1.cursp();
+    cg.current().1.push_n(1)?;
+    let sym = match parent {
+        Some(parent) => {
+            codegen(cg, parent, true)?;
+            let (session, scope) = cg.current();
+            scope.new_sym(session, &name)?
+        }
+        None => {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_1(session, opcode::OP_OCLASS, dst)?;
+            scope.push_n(1)?;
+            let (session, scope) = cg.current();
+            scope.new_sym(session, &name)?
+        }
+    };
+    if let Some(value) = rhs {
+        codegen(cg, value, true)?;
+        cg.current().1.pop_n(1)?;
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.gen_move(session, sp, dst, false)?;
+    }
+    cg.current().1.pop_n(2)?;
+    {
+        let (session, scope) = cg.current();
+        scope.genop_2(session, opcode::OP_SETMCNST, sp, sym)?;
+    }
+    Ok(())
+}
+
+/// Index assignment target (`gen_assignment` index arm): `recv[args] = sp`
+/// via `OP_SETIDX` for one index or an `[]=` send otherwise.
+fn gen_index_target<N: BackendNode>(cg: &mut Codegen, tree: &N, sp: u16) -> Result<(), Diagnostic> {
+    let Some(view) = tree.index_target() else {
+        return Err(unsupported(tree, "assignment target"));
+    };
+    codegen(cg, view.receiver, true)?;
+    // One slot less than call sites: the value in `sp` is an argument too.
+    let items = match view.args {
+        None => Vec::new(),
+        Some(args) => args
+            .raw_call_args()
+            .ok_or_else(|| unsupported(tree, "assignment target"))?,
+    };
+    let count = gen_values(cg, items, true, 13)?;
+    if count < 0 {
+        cg.current().1.push_n(1)?;
+        {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_2(session, opcode::OP_MOVE, dst, sp)?;
+        }
+        cg.current().1.push_n(1)?;
+        cg.current().1.pop_n(1)?;
+        cg.current().1.pop_n(1)?;
+        {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_2(session, opcode::OP_ARYPUSH, dst, 1)?;
+        }
+        cg.current().1.pop_n(1)?;
+        let sym = {
+            let (session, scope) = cg.current();
+            scope.new_sym(session, b"[]=")?
+        };
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_3(session, opcode::OP_SEND, dst, sym, CALL_MAXARGS as u8)?;
+        return Ok(());
+    }
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_MOVE, dst, sp)?;
+    }
+    cg.current().1.push_n(1)?;
+    if count == 1 {
+        cg.current().1.pop_n(3)?;
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_1(session, opcode::OP_SETIDX, dst)?;
+    } else {
+        cg.current().1.push_n(1)?;
+        cg.current().1.pop_n(1)?;
+        cg.current().1.pop_n((count + 2) as u16)?;
+        let sym = {
+            let (session, scope) = cg.current();
+            scope.new_sym(session, b"[]=")?
+        };
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_3(session, opcode::OP_SEND, dst, sym, (count + 1) as u8)?;
+    }
+    Ok(())
+}
+
+/// Call (attribute) assignment target (`gen_assignment` call arm):
+/// `recv.name = sp` via a one-argument send (`OP_SSEND` for bare `self`).
+fn gen_call_target<N: BackendNode>(cg: &mut Codegen, tree: &N, sp: u16) -> Result<(), Diagnostic> {
+    let Some(view) = tree.call_target() else {
+        return Err(unsupported(tree, "assignment target"));
+    };
+    // A written `self` is a call on self, so `OP_SSEND`, which fills the
+    // receiver register itself.
+    let noself = view.receiver.kind_name() == "SelfNode";
+    if noself {
+        cg.current().1.push_n(1)?;
+    } else {
+        codegen(cg, view.receiver, true)?;
+    }
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_MOVE, dst, sp)?;
+    }
+    cg.current().1.push_n(1)?;
+    cg.current().1.push_n(1)?;
+    cg.current().1.pop_n(1)?;
+    cg.current().1.pop_n(2)?;
+    let sym = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, &view.name)?
+    };
+    let (session, scope) = cg.current();
+    let dst = scope.cursp();
+    scope.genop_3(
+        session,
+        if noself {
+            opcode::OP_SSEND
+        } else {
+            opcode::OP_SEND
+        },
+        dst,
+        sym,
+        1,
+    )?;
     Ok(())
 }
 
@@ -761,6 +1045,409 @@ fn args_rest() -> u32 {
     1 << 12
 }
 
+/// `MRC_ARGS_BLOCK()` (`codegen.c` aspec layout).
+fn args_block() -> u32 {
+    1
+}
+
+/// `MRC_ARGS_NOBLOCK()` (`codegen.c` aspec layout, `&nil`).
+fn args_noblock() -> u32 {
+    1 << 23
+}
+
+/// Decoded parameter counts (`lambda_body` head): the `OP_ENTER` operand
+/// layout plus the block-move register.
+struct ParamCounts {
+    /// Mandatory positional parameters (multi-targets count as one).
+    ma: usize,
+    /// Optional positional parameters.
+    oa: usize,
+    /// Rest parameter present (`*`, `...` forwarding folds in later).
+    ra: bool,
+    /// Post-rest mandatory parameters.
+    pa: usize,
+    /// Keyword parameters.
+    ka: usize,
+    /// Keyword rest present (`**`, `...` forwarding folds in later).
+    kd: bool,
+    /// Block parameter present (`&`, `...` forwarding folds in later).
+    ba: bool,
+    /// Named block parameter (`None` for anonymous `&`).
+    block_name: Option<Vec<u8>>,
+    /// `&nil` (no block accepted, `MRC_ARGS_NOBLOCK`).
+    noblock: bool,
+    /// `...` forwarding (`ForwardingParameterNode` keyword rest).
+    forwarding: bool,
+    /// Register moved into the block slot (`0` for none).
+    block_reg: u16,
+}
+
+/// Anonymous rest marker (`MRC_OPSYM_2(mul)`).
+const REST_MARK: &[u8] = b"*";
+/// Anonymous keyword-rest marker (`MRC_OPSYM_2(pow)`).
+const KEYWORD_REST_MARK: &[u8] = b"**";
+/// Anonymous block marker (`MRC_OPSYM_2(and)`).
+const BLOCK_MARK: &[u8] = b"&";
+
+/// `OP_ENTER` operand and `ainfo` for decoded counts (`lambda_body` tail of
+/// the head: `(23bits = 5:5:1:5:5:1:1)` and `(12bits = 5:1:5:1)`).
+fn param_enter(counts: &ParamCounts) -> Result<(u16, u32), Diagnostic> {
+    if counts.ma > 0x1f || counts.oa > 0x1f || counts.pa > 0x1f || counts.ka > 0x1f {
+        return Err(Diagnostic {
+            message: "too many formal arguments".to_owned(),
+            start: 0,
+            end: 0,
+        });
+    }
+    let ra = counts.ra || counts.forwarding;
+    let ba = counts.ba || counts.forwarding;
+    let aspec = (if counts.noblock { args_noblock() } else { 0 })
+        | args_req(counts.ma)
+        | args_opt(counts.oa)
+        | (if ra { args_rest() } else { 0 })
+        | args_post(counts.pa)
+        | args_key(counts.ka, counts.kd)
+        | (if ba { args_block() } else { 0 });
+    let ainfo = ((((counts.ma + counts.oa) as u16) & 0x3f) << 7)
+        | ((u16::from(ra)) << 6)
+        | (((counts.pa as u16) & 0x1f) << 1)
+        | u16::from(counts.ka > 0 || counts.kd);
+    Ok((ainfo, aspec))
+}
+
+/// Append a required/post positional slot: the name, or a null placeholder
+/// for a destructured (`MultiTargetNode`) slot whose parts land later.
+fn push_positional<N: BackendNode>(
+    lv: &mut Vec<Vec<u8>>,
+    item: &N,
+    site: &N,
+    what: &str,
+) -> Result<(), Diagnostic> {
+    if item.kind_name() == "MultiTargetNode" {
+        lv.push(Vec::new());
+        return Ok(());
+    }
+    let Some(name) = item.required_param_name() else {
+        return Err(unsupported(site, what));
+    };
+    lv.push(name);
+    Ok(())
+}
+
+/// Parameter registers (`lambda_body` head for `ParametersNode`): lv layout
+/// plus counts. `body_locals` are the scope locals (block `;` locals pass as
+/// `extra_locals`); both land after the parameter registers in order.
+fn param_layout<N: BackendNode>(
+    params: &N,
+    body_locals: &[Vec<u8>],
+    extra_locals: &[Vec<u8>],
+    site: &N,
+) -> Result<(Vec<Vec<u8>>, ParamCounts), Diagnostic> {
+    let Some(view) = params.parameters_view() else {
+        return Err(unsupported(site, "block parameters"));
+    };
+    let mut counts = ParamCounts {
+        ma: view.requireds.len(),
+        oa: view.optionals.len(),
+        ra: view.rest.is_some(),
+        pa: view.posts.len(),
+        ka: view.keywords.len(),
+        kd: view.keyword_rest.is_some(),
+        ba: false,
+        block_name: None,
+        noblock: false,
+        forwarding: false,
+        block_reg: 0,
+    };
+    let mut lv: Vec<Vec<u8>> = Vec::new();
+    for item in &view.requireds {
+        push_positional(&mut lv, item, site, "method parameters")?;
+    }
+    for item in &view.optionals {
+        let Some((name, _)) = item.optional_param() else {
+            return Err(unsupported(site, "optional parameter"));
+        };
+        lv.push(name);
+    }
+    if let Some(rest) = &view.rest {
+        match rest.kind_name() {
+            "RestParameterNode" => {
+                let Some(maybe) = rest.rest_param_name() else {
+                    return Err(unsupported(site, "rest parameter"));
+                };
+                lv.push(maybe.unwrap_or_else(|| REST_MARK.to_vec()));
+            }
+            "ImplicitRestNode" => lv.push(REST_MARK.to_vec()),
+            _ => return Err(unsupported(site, "rest parameter")),
+        }
+    }
+    for item in &view.posts {
+        push_positional(&mut lv, item, site, "method parameters")?;
+    }
+    if let Some(block) = &view.block {
+        if block.block_param_noblock() {
+            counts.noblock = true;
+        } else {
+            let Some(maybe) = block.block_param_name() else {
+                return Err(unsupported(site, "block parameter"));
+            };
+            counts.ba = true;
+            counts.block_name = maybe;
+        }
+    }
+    if counts.ka > 0 || counts.kd || counts.ba {
+        let mut write_dastr = false;
+        if counts.ka > 0 || counts.kd {
+            write_dastr = true;
+        }
+        if counts.kd {
+            let rest = view.keyword_rest.as_ref().expect("keyword rest");
+            match rest.kind_name() {
+                "KeywordRestParameterNode" => {
+                    let Some(maybe) = rest.keyword_rest_name() else {
+                        return Err(unsupported(site, "keyword rest parameter"));
+                    };
+                    lv.push(maybe.unwrap_or_else(|| KEYWORD_REST_MARK.to_vec()));
+                    write_dastr = false;
+                }
+                "ForwardingParameterNode" => {
+                    counts.forwarding = true;
+                    write_dastr = false;
+                    lv.push(REST_MARK.to_vec());
+                    lv.push(KEYWORD_REST_MARK.to_vec());
+                    lv.push(Vec::new());
+                    lv.push(BLOCK_MARK.to_vec());
+                    counts.block_reg = u16::try_from(lv.len()).map_err(|_| too_complex())?;
+                }
+                _ => return Err(unsupported(site, "keyword rest parameter")),
+            }
+        }
+        if write_dastr {
+            lv.push(KEYWORD_REST_MARK.to_vec());
+        }
+    }
+    if !counts.forwarding {
+        lv.push(Vec::new());
+    }
+    if counts.ba {
+        let name = counts
+            .block_name
+            .take()
+            .unwrap_or_else(|| BLOCK_MARK.to_vec());
+        lv.push(name);
+        counts.block_reg = u16::try_from(lv.len()).map_err(|_| too_complex())?;
+    }
+    for item in &view.keywords {
+        let Some(part) = item.keyword_param() else {
+            return Err(unsupported(site, "keyword parameter"));
+        };
+        lv.push(part.name);
+    }
+    append_destructured_parts(&mut lv, &view.requireds, site)?;
+    append_destructured_parts(&mut lv, &view.posts, site)?;
+    for name in body_locals.iter().chain(extra_locals.iter()) {
+        if !lv.contains(name) {
+            lv.push(name.clone());
+        }
+    }
+    Ok((lv, counts))
+}
+
+/// Names a destructured (`MultiTargetNode`) positional slot expands to
+/// (`lambda_body` head tail: requireds then posts).
+fn append_destructured_parts<N: BackendNode>(
+    lv: &mut Vec<Vec<u8>>,
+    items: &[N],
+    site: &N,
+) -> Result<(), Diagnostic> {
+    for item in items {
+        if item.kind_name() != "MultiTargetNode" {
+            continue;
+        }
+        let Some(view) = item.multi_target_view() else {
+            return Err(unsupported(site, "method parameters"));
+        };
+        for part in &view.lefts {
+            let Some(name) = part.required_param_name() else {
+                return Err(unsupported(site, "method parameters"));
+            };
+            lv.push(name);
+        }
+    }
+    Ok(())
+}
+
+/// Optional-default jump table (`lambda_body`: `pos` chain over the
+/// `OP_ENTER` that was just emitted).
+fn emit_optional_setup<N: BackendNode>(
+    cg: &mut Codegen,
+    optionals: &[N],
+) -> Result<(), Diagnostic> {
+    if optionals.is_empty() {
+        return Ok(());
+    }
+    let mut jumps = Vec::with_capacity(optionals.len() + 1);
+    {
+        let (_, scope) = cg.current();
+        scope.new_label();
+    }
+    for _ in optionals {
+        let (_, scope) = cg.current();
+        scope.new_label();
+        jumps.push(scope.genjmp(opcode::OP_JMP, JMPLINK_START)?);
+    }
+    {
+        let (_, scope) = cg.current();
+        jumps.push(scope.genjmp(opcode::OP_JMP, JMPLINK_START)?);
+    }
+    for (index, item) in optionals.iter().enumerate() {
+        let Some((name, default)) = item.optional_param() else {
+            return Err(unsupported(item, "optional parameter"));
+        };
+        cg.current().1.dispatch(jumps[index])?;
+        codegen(cg, default, true)?;
+        cg.current().1.pop_n(1)?;
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        let slot = scope.lv_idx(&name);
+        if slot == 0 {
+            return Err(internal_error("optional parameter must be local variable"));
+        }
+        scope.gen_move(session, slot, dst, false)?;
+    }
+    cg.current()
+        .1
+        .dispatch(*jumps.last().expect("trailing jump"))?;
+    Ok(())
+}
+
+/// Keyword-argument setup (`lambda_body`: `OP_KEY_P` defaults, `OP_KARG`
+/// reads, `OP_KEYEND` when no rest gathers the remainder).
+fn emit_keyword_setup<N: BackendNode>(
+    cg: &mut Codegen,
+    keywords: &[N],
+    with_rest: bool,
+) -> Result<(), Diagnostic> {
+    if keywords.is_empty() {
+        return Ok(());
+    }
+    for item in keywords {
+        let Some(part) = item.keyword_param() else {
+            return Err(unsupported(item, "keyword parameter"));
+        };
+        let mut default_jump = None;
+        if let Some(default) = part.default {
+            let sym = {
+                let (session, scope) = cg.current();
+                scope.new_sym(session, &part.name)?
+            };
+            let slot = cg.current().1.lv_idx(&part.name);
+            if slot == 0 {
+                return Err(internal_error("keyword parameter must be local variable"));
+            }
+            {
+                let (session, scope) = cg.current();
+                scope.genop_2(session, opcode::OP_KEY_P, slot, sym)?;
+            }
+            let pos = {
+                let (session, scope) = cg.current();
+                scope.genjmp2(session, opcode::OP_JMPIF, slot, JMPLINK_START, false)?
+            };
+            codegen(cg, default, true)?;
+            cg.current().1.pop_n(1)?;
+            {
+                let (session, scope) = cg.current();
+                let dst = scope.cursp();
+                scope.gen_move(session, slot, dst, false)?;
+            }
+            {
+                let (_, scope) = cg.current();
+                default_jump = Some(scope.genjmp(opcode::OP_JMP, JMPLINK_START)?);
+            }
+            {
+                let (_, scope) = cg.current();
+                scope.dispatch(pos)?;
+            }
+        }
+        let sym = {
+            let (session, scope) = cg.current();
+            scope.new_sym(session, &part.name)?
+        };
+        let slot = cg.current().1.lv_idx(&part.name);
+        if slot == 0 {
+            return Err(internal_error("keyword parameter must be local variable"));
+        }
+        {
+            let (session, scope) = cg.current();
+            scope.genop_2(session, opcode::OP_KARG, slot, sym)?;
+        }
+        if let Some(pos) = default_jump {
+            cg.current().1.dispatch(pos)?;
+        }
+    }
+    if !with_rest {
+        let (_, scope) = cg.current();
+        scope.genop_0(opcode::OP_KEYEND)?;
+    }
+    Ok(())
+}
+
+/// Destructured positional slots (`lambda_body`: `gen_massignment` over the
+/// parameter register plus the `APOST` reacquire).
+fn emit_destructure_setup<N: BackendNode>(
+    cg: &mut Codegen,
+    items: &[N],
+    mut pos: u16,
+) -> Result<(), Diagnostic> {
+    for item in items {
+        if item.kind_name() == "MultiTargetNode" {
+            let Some(view) = item.multi_target_view() else {
+                return Err(unsupported(item, "method parameters"));
+            };
+            let count = u16::try_from(view.lefts.len()).map_err(|_| too_complex())?;
+            gen_massignment(
+                cg,
+                view.lefts,
+                view.rest,
+                view.rights,
+                i32::from(pos),
+                false,
+            )?;
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.gen_move(session, dst, pos, false)?;
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_3(session, opcode::OP_APOST, dst, count, 0)?;
+        }
+        pos += 1;
+    }
+    Ok(())
+}
+
+/// Full argument setup after `OP_ENTER` (`lambda_body` body head): optional
+/// defaults, keyword reads, the block move and destructured slots.
+fn emit_param_setup<N: BackendNode>(
+    cg: &mut Codegen,
+    params: &N,
+    counts: &ParamCounts,
+) -> Result<(), Diagnostic> {
+    let Some(view) = params.parameters_view() else {
+        return Err(unsupported(params, "method parameters"));
+    };
+    emit_optional_setup(cg, &view.optionals)?;
+    emit_keyword_setup(cg, &view.keywords, counts.kd)?;
+    if counts.block_reg != 0 {
+        let (session, scope) = cg.current();
+        scope.gen_move(session, counts.block_reg, counts.block_reg - 1, false)?;
+    }
+    emit_destructure_setup(cg, &view.requireds, 1)?;
+    let rest_slots = usize::from(counts.ra || counts.forwarding);
+    let post_base = (counts.ma + counts.oa + rest_slots) as u16 + 1;
+    emit_destructure_setup(cg, &view.posts, post_base)?;
+    Ok(())
+}
+
 /// Plain block body (`BlockNode`): child scope with `OP_BLOCK`.
 fn gen_block<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
     if !val {
@@ -798,9 +1485,8 @@ fn gen_lambda<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<()
 }
 
 /// Shared `lambda_body` for blocks and lambdas (`blk = 1`).
-/// Covers empty, plain `|x|`, `|x, y|`, `|*a|` (named or anonymous),
-/// numbered (`_1`) and `it` forms; optional, post, keyword, block and
-/// destructured parameters are gated with diagnostics.
+/// Covers empty, numbered (`_1`) and `it` forms plus the full
+/// optional/rest/post/keyword/block/destructured layout.
 fn gen_lambda_body<N: BackendNode>(
     cg: &mut Codegen,
     locals: Vec<Vec<u8>>,
@@ -810,6 +1496,7 @@ fn gen_lambda_body<N: BackendNode>(
     site: &N,
 ) -> Result<(), Diagnostic> {
     let mut lv: Vec<Vec<u8>> = Vec::new();
+    let mut setup: Option<(N, ParamCounts)> = None;
     let (ainfo, aspec) = match params {
         None => {
             // Empty block: placeholder plus declared locals.
@@ -858,87 +1545,44 @@ fn gen_lambda_body<N: BackendNode>(
                     };
                     semi.push(name);
                 }
-                let Some(inner) = view.params else {
-                    // `||` or `|;local|`: no positional layout.
-                    lv.push(Vec::new());
-                    for name in locals.iter().chain(semi.iter()) {
-                        if !lv.contains(name) {
-                            lv.push(name.clone());
+                match view.params {
+                    None => {
+                        // `||` or `|;local|`: no positional layout.
+                        lv.push(Vec::new());
+                        for name in locals.iter().chain(semi.iter()) {
+                            if !lv.contains(name) {
+                                lv.push(name.clone());
+                            }
                         }
+                        (0, args_req(0))
                     }
-                    return enter_block_scope(cg, lv, 0, args_req(0), body, op);
-                };
-                if inner.kind_name() != "ParametersNode" {
-                    return Err(unsupported(site, "block parameters"));
-                }
-                let Some(view) = inner.parameters_view() else {
-                    return Err(unsupported(site, "block parameters"));
-                };
-                if !view.optionals.is_empty() {
-                    return Err(unsupported(site, "block optional parameter"));
-                }
-                if !view.posts.is_empty() {
-                    return Err(unsupported(site, "block post parameter"));
-                }
-                if !view.keywords.is_empty() || view.keyword_rest.is_some() {
-                    return Err(unsupported(site, "block keyword parameter"));
-                }
-                if view.block.is_some() {
-                    return Err(unsupported(site, "block block parameter"));
-                }
-                let mut required_names: Vec<Vec<u8>> = Vec::new();
-                for item in &view.requireds {
-                    let Some(name) = item.required_param_name() else {
-                        return Err(unsupported(site, "block destructuring"));
-                    };
-                    required_names.push(name);
-                }
-                let mut rest_name: Option<Vec<u8>> = None;
-                if let Some(rest) = &view.rest {
-                    match rest.kind_name() {
-                        "RestParameterNode" => {
-                            let Some(maybe) = rest.rest_param_name() else {
-                                return Err(unsupported(site, "block rest parameter"));
-                            };
-                            rest_name = Some(maybe.unwrap_or_else(|| b"*".to_vec()));
-                        }
-                        "ImplicitRestNode" => {
-                            rest_name = Some(b"*".to_vec());
-                        }
-                        _ => return Err(unsupported(site, "block rest parameter")),
+                    Some(inner) => {
+                        let (layout, counts) = param_layout(&inner, &locals, &semi, site)?;
+                        let (ainfo, aspec) = param_enter(&counts)?;
+                        lv = layout;
+                        setup = Some((inner, counts));
+                        (ainfo, aspec)
                     }
                 }
-                if required_names.len() > 0x1f {
-                    return Err(Diagnostic {
-                        message: "too many formal arguments".to_owned(),
-                        start: 0,
-                        end: 0,
-                    });
-                }
-                let ma = required_names.len();
-                let ra = u16::from(rest_name.is_some());
-                lv.extend(required_names);
-                if let Some(name) = rest_name {
-                    lv.push(name);
-                }
-                lv.push(Vec::new());
-                for name in locals.iter().chain(semi.iter()) {
-                    if !lv.contains(name) {
-                        lv.push(name.clone());
-                    }
-                }
-                let info = (((ma as u16) & 0x3f) << 7) | (ra << 6);
-                let spec = args_req(ma) | if ra == 1 { args_rest() } else { 0 };
-                (info, spec)
             }
             _ => return Err(unsupported(site, "block parameters")),
         },
     };
-    enter_block_scope(cg, lv, ainfo, aspec, body, op)
+    enter_block_scope(
+        cg,
+        lv,
+        ainfo,
+        aspec,
+        body,
+        op,
+        setup.as_ref().map(|(p, c)| (p, c)),
+    )
 }
 
 /// Pushes the child scope, emits `OP_ENTER`, codes the body and emits
 /// `OP_BLOCK`/`OP_LAMBDA` in the parent (`lambda_body` tail with `blk`).
+/// `setup` carries the argument setup (defaults, keywords, block move,
+/// destructuring) emitted between `OP_ENTER` and the body.
 fn enter_block_scope<N: BackendNode>(
     cg: &mut Codegen,
     lv: Vec<Vec<u8>>,
@@ -946,6 +1590,7 @@ fn enter_block_scope<N: BackendNode>(
     aspec: u32,
     body: Option<N>,
     op: u8,
+    setup: Option<(&N, &ParamCounts)>,
 ) -> Result<(), Diagnostic> {
     let child = Scope::child(&mut cg.session, cg.scopes.last().expect("open scope"), &lv)?;
     cg.scopes.push(child);
@@ -959,6 +1604,9 @@ fn enter_block_scope<N: BackendNode>(
     {
         let (_, scope) = cg.current();
         scope.genop_w(opcode::OP_ENTER, aspec)?;
+    }
+    if let Some((params, counts)) = setup {
+        emit_param_setup(cg, params, counts)?;
     }
     {
         let (_, scope) = cg.current();
@@ -1839,6 +2487,8 @@ fn codegen_supports(kind: &str) -> bool {
             | "LambdaNode"
             | "YieldNode"
             | "MultiWriteNode"
+            | "BackReferenceReadNode"
+            | "NumberedReferenceReadNode"
     )
 }
 
@@ -1952,10 +2602,6 @@ fn codegen_defined<N: BackendNode>(
             gen_defined_answer(cg, &a)?;
         }
     } else if let Some(unless_nil) = a.unless_nil {
-        if !codegen_supports(value.kind_name()) {
-            cg.current().1.rlev = rlev;
-            return Err(defined_gate(&value, "back-reference operand"));
-        }
         codegen(cg, value, true)?;
         cg.current().1.pop_n(1)?;
         {
@@ -2951,24 +3597,31 @@ fn gen_def<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), D
     let Some(view) = node.def_view() else {
         return Err(unsupported(&node, "method parameters"));
     };
-    if view.required_params.len() > 0x1f {
-        return Err(Diagnostic {
-            message: "too many formal arguments".to_owned(),
-            start: 0,
-            end: 0,
-        });
-    }
-    // Locals layout mirrors `lambda_body`: parameters, a null slot, then
-    // the remaining body locals in order.
-    let mut locals = view.required_params.clone();
-    locals.push(Vec::new());
-    for name in &view.locals {
-        if !locals.contains(name) {
-            locals.push(name.clone());
+    // Full `lambda_body` (`blk=0`): parameter registers, `OP_ENTER`,
+    // defaults, keywords, block move and destructured slots.
+    let (locals, setup) = match view.params {
+        None => {
+            let mut locals = vec![Vec::new()];
+            for name in &view.locals {
+                if !locals.contains(name) {
+                    locals.push(name.clone());
+                }
+            }
+            (locals, None)
         }
+        Some(params) => {
+            let (lv, counts) = param_layout(&params, &view.locals, &[], &node)?;
+            let (ainfo, aspec) = param_enter(&counts)?;
+            (lv, Some((params, counts, ainfo, aspec)))
+        }
+    };
+    match &setup {
+        None => cg.push_method_body(&locals, ainfo_req(0), args_req(0))?,
+        Some((_, _, ainfo, aspec)) => cg.push_method_body(&locals, *ainfo, *aspec)?,
     }
-    let count = view.required_params.len();
-    cg.push_method_body(&locals, ainfo_req(count), args_req(count))?;
+    if let Some((params, counts, _, _)) = &setup {
+        emit_param_setup(cg, params, counts)?;
+    }
     match view.body {
         Some(body) => codegen(cg, body, true)?,
         None => emit_absent_else(cg)?,
@@ -3391,6 +4044,91 @@ fn gen_gvar_read<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result
         cg.current().1.push_n(1)?;
     }
     Ok(())
+}
+
+/// Match-back-reference read (`gen_match_ref`): `$&`, `` $` ``, `$'`,
+/// `$+` and `$N` read `$~` and, where it is not nil, send it the private
+/// reader (`__group` with `n` for `$&`/`$N`, `__pre_match`, `__post_match`
+/// or `__last_group`); a nil `$~` reads as nil like an unset global.
+fn gen_match_ref(cg: &mut Codegen, meth: &[u8], n: i64) -> Result<(), Diagnostic> {
+    let last_match = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, b"$~")?
+    };
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_GETGV, dst, last_match)?;
+    }
+    let skip = {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genjmp2(session, opcode::OP_JMPNIL, dst, JMPLINK_START, true)?
+    };
+    cg.current().1.push_n(1)?;
+    if n >= 0 {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.gen_int(session, dst, n)?;
+        cg.current().1.push_n(1)?;
+    }
+    cg.current().1.push_n(1)?;
+    cg.current().1.pop_n(1)?;
+    cg.current().1.pop_n(if n >= 0 { 2 } else { 1 })?;
+    let sym = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, meth)?
+    };
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        if n >= 0 {
+            scope.genop_3(session, opcode::OP_SEND, dst, sym, 1)?;
+        } else {
+            scope.genop_2(session, opcode::OP_SEND0, dst, sym)?;
+        }
+    }
+    cg.current().1.dispatch(skip)?;
+    cg.current().1.push_n(1)
+}
+
+/// `$&`, `` $` ``, `$'` and `$+` (`PM_BACK_REFERENCE_READ_NODE`).
+fn gen_backref<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    if !val {
+        return Ok(());
+    }
+    let Some(name) = node.backref_name() else {
+        return Err(unsupported(&node, "back-reference read"));
+    };
+    // The parser admits no other name here; `$+` takes the default arm.
+    match name.get(1).copied().unwrap_or(0) {
+        b'&' => gen_match_ref(cg, b"__group", 0),
+        b'`' => gen_match_ref(cg, b"__pre_match", -1),
+        b'\'' => gen_match_ref(cg, b"__post_match", -1),
+        _ => gen_match_ref(cg, b"__last_group", -1),
+    }
+}
+
+/// `$N` (`PM_NUMBERED_REFERENCE_READ_NODE`): an unrepresentable number
+/// reads as nil without asking, like CRuby.
+fn gen_numbered_ref<N: BackendNode>(
+    cg: &mut Codegen,
+    node: N,
+    val: bool,
+) -> Result<(), Diagnostic> {
+    if !val {
+        return Ok(());
+    }
+    let Some(number) = node.numbered_ref_number() else {
+        return Err(unsupported(&node, "numbered reference read"));
+    };
+    if number == 0 || number > i32::MAX as u32 {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+        return scope.push_n(1);
+    }
+    gen_match_ref(cg, b"__group", i64::from(number))
 }
 
 /// Global variable write (`PM_GLOBAL_VARIABLE_WRITE_NODE`).

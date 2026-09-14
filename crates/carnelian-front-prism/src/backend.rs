@@ -1,11 +1,11 @@
 //! `BackendNode` for borrowed nodes (thin access, no tree copies).
 
 use carnelian_ast::view::{
-    BackendNode, BeginView, BlockParamView, BlockView, CallView, CaseView, ClassView,
-    ConstPathRead, ConstPathWrite, DefView, EnsureView, IfView, IntegerLit, LambdaView, LvarRef,
-    LvarWrite, ModuleView, MultiTargetView, MultiWriteView, ParamsView, ProgramView,
-    RescueModifierView, RescueView, SclassView, SimpleLit, SuperView, VarWrite, WhenView,
-    WhileView, YieldView,
+    BackendNode, BeginView, BlockParamView, BlockView, CallTargetView, CallView, CaseView,
+    ClassView, ConstPathRead, ConstPathWrite, DefView, EnsureView, IfView, IndexTargetView,
+    IntegerLit, KeywordParamView, LambdaView, LvarRef, LvarWrite, ModuleView, MultiTargetView,
+    MultiWriteView, ParamsView, ProgramView, RescueModifierView, RescueView, SclassView, SimpleLit,
+    SuperView, VarWrite, WhenView, WhileView, YieldView,
 };
 use carnelian_ast::AstNode;
 
@@ -29,6 +29,37 @@ fn else_statements<'pr>(clause: &ruby_prism::ElseNode<'pr>) -> Vec<PrismNode<'pr
 
 fn const_bytes(id: ruby_prism::ConstantId<'_>) -> Vec<u8> {
     id.as_slice().to_vec()
+}
+
+/// `PM_PARAMETER_FLAGS_NIL_BLOCK` of the patched reference Prism
+/// (`&nil`, "method accepts no block").
+const NIL_BLOCK_FLAG: u32 = 8;
+
+/// Decimal digits of a little-endian base-2^32 limb slice, without leading
+/// zeros (empty input reads as zero).
+fn limbs_to_decimal(limbs: &[u32]) -> Vec<u8> {
+    let mut words: Vec<u32> = limbs.to_vec();
+    while words.last() == Some(&0) {
+        words.pop();
+    }
+    if words.is_empty() {
+        return vec![b'0'];
+    }
+    let mut digits = Vec::new();
+    while !words.is_empty() {
+        let mut remainder: u64 = 0;
+        for index in (0..words.len()).rev() {
+            let current = (remainder << 32) | u64::from(words[index]);
+            words[index] = (current / 10) as u32;
+            remainder = current % 10;
+        }
+        digits.push(b'0' + remainder as u8);
+        while words.last() == Some(&0) {
+            words.pop();
+        }
+    }
+    digits.reverse();
+    digits
 }
 
 impl BackendNode for PrismNode<'_> {
@@ -59,16 +90,13 @@ impl BackendNode for PrismNode<'_> {
                 return Some(IntegerLit::I64(scalar));
             }
         }
-        // Overflow: decimal source digits (mirrors `pm_integer_string`).
-        let mut text = node.location().as_slice();
-        if negative && !text.is_empty() && (text[0] == b'-' || text[0] == b'+') {
-            text = &text[1..];
-        }
-        let digits: Vec<u8> = text.iter().copied().filter(|b| *b != b'_').collect();
-        if digits.is_empty() || !digits.iter().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        Some(IntegerLit::Bigint { digits, negative })
+        // Overflow: decimal digits of the value (`pm_integer_string`
+        // stringifies, so source radix, underscores and leading zeros never
+        // reach the pool).
+        Some(IntegerLit::Bigint {
+            digits: limbs_to_decimal(limbs),
+            negative,
+        })
     }
 
     fn float_lit(&self) -> Option<f64> {
@@ -378,42 +406,56 @@ impl BackendNode for PrismNode<'_> {
 
     fn def_view(&self) -> Option<DefView<Self>> {
         let node = self.inner.as_def_node()?;
-        let mut required_params = Vec::new();
-        if let Some(params) = node.parameters() {
-            if !params.optionals().is_empty() {
-                return None;
-            }
-            if params.rest().is_some() {
-                return None;
-            }
-            if !params.posts().is_empty() {
-                return None;
-            }
-            if !params.keywords().is_empty() {
-                return None;
-            }
-            if params.keyword_rest().is_some() {
-                return None;
-            }
-            if params.block().is_some() {
-                return None;
-            }
-            for argument in params.requireds().iter() {
-                let child = wrap(argument);
-                let param = child.inner.as_required_parameter_node()?;
-                required_params.push(const_bytes(param.name()));
-            }
-        }
         Some(DefView {
             name: const_bytes(node.name()),
             receiver: node.receiver().map(wrap),
-            required_params,
+            params: node
+                .parameters()
+                .map(|parameters| wrap(parameters.as_node())),
             body: node.body().map(wrap),
             locals: node
                 .locals()
                 .iter()
                 .map(|id| id.as_slice().to_vec())
                 .collect(),
+        })
+    }
+
+    fn optional_param(&self) -> Option<(Vec<u8>, Self)> {
+        let node = self.inner.as_optional_parameter_node()?;
+        Some((const_bytes(node.name()), wrap(node.value())))
+    }
+
+    fn keyword_param(&self) -> Option<KeywordParamView<Self>> {
+        if let Some(node) = self.inner.as_required_keyword_parameter_node() {
+            return Some(KeywordParamView {
+                name: const_bytes(node.name()),
+                default: None,
+            });
+        }
+        let node = self.inner.as_optional_keyword_parameter_node()?;
+        Some(KeywordParamView {
+            name: const_bytes(node.name()),
+            default: Some(wrap(node.value())),
+        })
+    }
+
+    fn keyword_rest_name(&self) -> Option<Option<Vec<u8>>> {
+        let node = self.inner.as_keyword_rest_parameter_node()?;
+        Some(node.name().map(|id| id.as_slice().to_vec()))
+    }
+
+    fn block_param_name(&self) -> Option<Option<Vec<u8>>> {
+        let node = self.inner.as_block_parameter_node()?;
+        Some(node.name().map(|id| id.as_slice().to_vec()))
+    }
+
+    fn block_param_noblock(&self) -> bool {
+        // Patched reference Prism sets `PM_PARAMETER_FLAGS_NIL_BLOCK`;
+        // upstream `ruby-prism` has no such flag constant, so test the bit.
+        self.inner.as_block_parameter_node().is_some_and(|node| {
+            (u32::from(node.flags()) & NIL_BLOCK_FLAG) != 0
+                || node.name().is_some_and(|id| id.as_slice() == b"nil")
         })
     }
 
@@ -651,6 +693,47 @@ impl BackendNode for PrismNode<'_> {
         })
     }
 
+    fn ivar_target_name(&self) -> Option<Vec<u8>> {
+        let node = self.inner.as_instance_variable_target_node()?;
+        Some(const_bytes(node.name()))
+    }
+
+    fn cvar_target_name(&self) -> Option<Vec<u8>> {
+        let node = self.inner.as_class_variable_target_node()?;
+        Some(const_bytes(node.name()))
+    }
+
+    fn gvar_target_name(&self) -> Option<Vec<u8>> {
+        let node = self.inner.as_global_variable_target_node()?;
+        Some(const_bytes(node.name()))
+    }
+
+    fn const_target_name(&self) -> Option<Vec<u8>> {
+        let node = self.inner.as_constant_target_node()?;
+        Some(const_bytes(node.name()))
+    }
+
+    fn const_path_target(&self) -> Option<(Option<Self>, Vec<u8>)> {
+        let node = self.inner.as_constant_path_target_node()?;
+        Some((node.parent().map(wrap), const_bytes(node.name()?)))
+    }
+
+    fn index_target(&self) -> Option<IndexTargetView<Self>> {
+        let node = self.inner.as_index_target_node()?;
+        Some(IndexTargetView {
+            receiver: wrap(node.receiver()),
+            args: node.arguments().map(|arguments| wrap(arguments.as_node())),
+        })
+    }
+
+    fn call_target(&self) -> Option<CallTargetView<Self>> {
+        let node = self.inner.as_call_target_node()?;
+        Some(CallTargetView {
+            receiver: wrap(node.receiver()),
+            name: const_bytes(node.name()),
+        })
+    }
+
     fn alias_pair(&self) -> Option<(Self, Self)> {
         let node = self.inner.as_alias_method_node()?;
         Some((wrap(node.new_name()), wrap(node.old_name())))
@@ -679,6 +762,16 @@ impl BackendNode for PrismNode<'_> {
     fn instance_var_read_name(&self) -> Option<Vec<u8>> {
         let node = self.inner.as_instance_variable_read_node()?;
         Some(const_bytes(node.name()))
+    }
+
+    fn backref_name(&self) -> Option<Vec<u8>> {
+        let node = self.inner.as_back_reference_read_node()?;
+        Some(const_bytes(node.name()))
+    }
+
+    fn numbered_ref_number(&self) -> Option<u32> {
+        let node = self.inner.as_numbered_reference_read_node()?;
+        Some(node.number())
     }
 
     fn global_var_read_name(&self) -> Option<Vec<u8>> {

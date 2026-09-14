@@ -144,13 +144,24 @@ fn def_accessor_covers_plain_and_gated_params() {
     let view = node.def_view().expect("def");
     assert_eq!(view.name, b"foo");
     assert!(view.receiver.is_none());
-    assert_eq!(view.required_params, vec![b"a".to_vec(), b"b".to_vec()]);
+    let params = view.params.expect("params");
+    let parts = params.parameters_view().expect("parameters");
+    let mut names = Vec::new();
+    for item in &parts.requireds {
+        names.push(item.required_param_name().expect("required"));
+    }
+    assert_eq!(names, vec![b"a".to_vec(), b"b".to_vec()]);
     assert!(view.body.is_some());
 
-    // Optional parameters stay gated.
+    // Optional parameters are exposed; the backend gates them until Phase 1.
     let parsed = parse(b"def foo(a = 1)\n  a\nend\n");
     let node = first_statement(&parsed);
-    assert!(node.def_view().is_none());
+    let view = node.def_view().expect("def");
+    let params = view.params.expect("params");
+    let parts = params.parameters_view().expect("parameters");
+    assert_eq!(parts.optionals.len(), 1);
+    let (name, _) = parts.optionals[0].optional_param().expect("optional");
+    assert_eq!(name, b"a");
 }
 
 #[test]

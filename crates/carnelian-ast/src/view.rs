@@ -246,21 +246,31 @@ pub struct ParamsView<N> {
     pub block: Option<N>,
 }
 
-/// Method definition parts (`DefNode`). `required_params` holds the required
-/// positional names in order; any optional/rest/post/keyword/block form is
-/// gated (the accessor returns `None` like `call_args` does for splats).
+/// Method definition parts (`DefNode`). `params` holds the `ParametersNode`
+/// (`None` for a parameterless `def`); the backend ports `lambda_body`
+/// (`blk=0`) for the full optional/rest/post/keyword/block layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefView<N> {
     /// Method name bytes.
     pub name: Vec<u8>,
     /// Explicit receiver (`def self.foo`, `None` for plain `def`).
     pub receiver: Option<N>,
-    /// Required positional parameter names in order.
-    pub required_params: Vec<Vec<u8>>,
+    /// Parameter list (`None` for `def f` without parentheses).
+    pub params: Option<N>,
     /// Body node (`None` for an empty body).
     pub body: Option<N>,
     /// Method-scope locals in order (includes parameters).
     pub locals: Vec<Vec<u8>>,
+}
+
+/// Keyword parameter parts: `default` is `None` for a required keyword
+/// (`a:`) and `Some` for one with a default (`a: 1`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeywordParamView<N> {
+    /// Keyword name bytes.
+    pub name: Vec<u8>,
+    /// Default value (`None` for a required keyword).
+    pub default: Option<N>,
 }
 
 /// Class parts (`ClassNode`). The constant path is either a plain read
@@ -334,6 +344,24 @@ pub struct ConstPathRead<N> {
     /// Parent object (`None` for the rooted form).
     pub parent: Option<N>,
     /// Constant name bytes.
+    pub name: Vec<u8>,
+}
+
+/// Index assignment target (`recv[args] = value`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexTargetView<N> {
+    /// Receiver expression.
+    pub receiver: N,
+    /// `ArgumentsNode` (`None` for a bare `recv[] = value`).
+    pub args: Option<N>,
+}
+
+/// Call (attribute) assignment target (`recv.name = value`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallTargetView<N> {
+    /// Receiver expression.
+    pub receiver: N,
+    /// Attribute name bytes (without the `=`).
     pub name: Vec<u8>,
 }
 
@@ -513,6 +541,35 @@ pub trait BackendNode: AstNode + Sized {
         None
     }
 
+    /// Optional parameter name and default (`OptionalParameterNode`).
+    fn optional_param(&self) -> Option<(Vec<u8>, Self)> {
+        None
+    }
+
+    /// Keyword parameter name and default (`RequiredKeywordParameterNode`
+    /// yields `default: None`, `OptionalKeywordParameterNode` yields the
+    /// default expression).
+    fn keyword_param(&self) -> Option<KeywordParamView<Self>> {
+        None
+    }
+
+    /// Keyword-rest name (`KeywordRestParameterNode`); outer `None` is not
+    /// such a node, inner `None` is an anonymous `**`.
+    fn keyword_rest_name(&self) -> Option<Option<Vec<u8>>> {
+        None
+    }
+
+    /// Block parameter name (`BlockParameterNode`); outer `None` is not
+    /// such a node, inner `None` is an anonymous `&`.
+    fn block_param_name(&self) -> Option<Option<Vec<u8>>> {
+        None
+    }
+
+    /// True for `&nil` (the method accepts no block, `MRC_ARGS_NOBLOCK`).
+    fn block_param_noblock(&self) -> bool {
+        false
+    }
+
     /// Block-local name (`BlockLocalVariableNode`).
     fn block_local_name(&self) -> Option<Vec<u8>> {
         None
@@ -675,6 +732,41 @@ pub trait BackendNode: AstNode + Sized {
         None
     }
 
+    /// Instance variable target name (`InstanceVariableTargetNode`).
+    fn ivar_target_name(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Class variable target name (`ClassVariableTargetNode`).
+    fn cvar_target_name(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Global variable target name (`GlobalVariableTargetNode`).
+    fn gvar_target_name(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Constant target name (`ConstantTargetNode`).
+    fn const_target_name(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Constant path target (`ConstantPathTargetNode`): parent and name.
+    fn const_path_target(&self) -> Option<(Option<Self>, Vec<u8>)> {
+        None
+    }
+
+    /// Index assignment target (`IndexTargetNode`).
+    fn index_target(&self) -> Option<IndexTargetView<Self>> {
+        None
+    }
+
+    /// Call assignment target (`CallTargetNode`).
+    fn call_target(&self) -> Option<CallTargetView<Self>> {
+        None
+    }
+
     /// Whether an arguments node carries `...` forwarding.
     fn args_forwarding(&self) -> bool {
         false
@@ -682,6 +774,16 @@ pub trait BackendNode: AstNode + Sized {
 
     /// Instance variable read name (`InstanceVariableReadNode`).
     fn instance_var_read_name(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Back-reference name (`BackReferenceReadNode`, e.g. `$&`).
+    fn backref_name(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Numbered reference number (`NumberedReferenceReadNode`, e.g. `$1`).
+    fn numbered_ref_number(&self) -> Option<u32> {
         None
     }
 
