@@ -3,8 +3,8 @@
 //! byte, in both strip modes. Exit `0` required. Pattern matching (`case/in`,
 //! `in`/`=>`), `BEGIN`/`END` and flip-flop belong to later work and are
 //! locked as diagnostics below, never as diverging bytes. `defined?`
-//! sub-cases that need a constant/ivar/gvar/cvar receiver or a back-reference
-//! read stay gated for the same reason.
+//! back-reference reads and chain links that hit still-gated call forms stay
+//! gated for the same reason.
 
 use std::process::Command;
 
@@ -80,38 +80,19 @@ const SNIPPETS: &[(&str, &str)] = &[
     ("defined_literal_block", "puts defined?(foo { })\n"),
     ("defined_logic", "puts defined?(x && y)\n"),
     ("defined_nested", "puts defined?(defined?(x))\n"),
+    ("defined_receiver_const", "puts defined?(A.foo)\n"),
+    ("defined_receiver_const_path", "puts defined?(A::B.foo)\n"),
+    ("defined_receiver_ivar", "puts defined?(@x.foo)\n"),
+    ("defined_receiver_gvar", "puts defined?($x.foo)\n"),
+    ("defined_receiver_cvar", "puts defined?(@@x.foo)\n"),
+    ("defined_receiver_chain", "puts defined?(Foo.bar.baz)\n"),
+    ("defined_begin_rescue", "puts defined?(begin; 1; rescue; 2; end)\n"),
 ];
 
 /// Left-out syntax: compilation must fail with a diagnostic, and must never
 /// emit bytes that diverge from the reference.
 const GATED: &[(&str, &str, &str)] = &[
-    // `defined?` sub-cases whose receivers need unported constant/ivar/gvar/
-    // cvar codegen, or whose back-reference reads are unported.
-    (
-        "defined_receiver_const_gated",
-        "puts defined?(A.foo)\n",
-        "ConstantReadNode",
-    ),
-    (
-        "defined_receiver_const_path_gated",
-        "puts defined?(A::B.foo)\n",
-        "ConstantPathNode",
-    ),
-    (
-        "defined_receiver_ivar_gated",
-        "puts defined?(@x.foo)\n",
-        "InstanceVariableReadNode",
-    ),
-    (
-        "defined_receiver_gvar_gated",
-        "puts defined?($x.foo)\n",
-        "GlobalVariableReadNode",
-    ),
-    (
-        "defined_receiver_cvar_gated",
-        "puts defined?(@@x.foo)\n",
-        "ClassVariableReadNode",
-    ),
+    // `defined?` sub-cases whose back-reference reads are unported.
     (
         "defined_backref_gated",
         "puts defined?($&)\n",

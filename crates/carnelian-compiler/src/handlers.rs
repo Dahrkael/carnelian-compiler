@@ -1829,6 +1829,16 @@ fn codegen_supports(kind: &str) -> bool {
             | "SelfNode"
             | "AliasMethodNode"
             | "UndefNode"
+            | "ConstantReadNode"
+            | "ConstantPathNode"
+            | "InstanceVariableReadNode"
+            | "GlobalVariableReadNode"
+            | "ClassVariableReadNode"
+            | "BeginNode"
+            | "BlockNode"
+            | "LambdaNode"
+            | "YieldNode"
+            | "MultiWriteNode"
     )
 }
 
