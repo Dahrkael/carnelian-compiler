@@ -125,6 +125,56 @@ pub struct ProgramView<N> {
     pub body: N,
 }
 
+/// Block or lambda parts (`BlockNode`, `LambdaNode` share the layout).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockView<N> {
+    /// Block locals (`locals` field).
+    pub locals: Vec<Vec<u8>>,
+    /// Parameters node (`BlockParametersNode`, `NumberedParametersNode`,
+    /// `ItParametersNode`, or absent for an empty block).
+    pub params: Option<N>,
+    /// Body node (`StatementsNode`, `BeginNode`, or absent).
+    pub body: Option<N>,
+}
+
+/// Lambda parts (same layout as blocks, distinct opcode).
+pub type LambdaView<N> = BlockView<N>;
+
+/// `yield` parts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct YieldView<N> {
+    /// Arguments node (`ArgumentsNode`, absent for bare `yield`).
+    pub args: Option<N>,
+}
+
+/// `BlockParametersNode` parts (`|...;...|` wrapper).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockParamView<N> {
+    /// Inner `ParametersNode` (absent for `||` or `|;local|` forms).
+    pub params: Option<N>,
+    /// `;` block locals (`BlockLocalVariableNode` children).
+    pub block_locals: Vec<N>,
+}
+
+/// `ParametersNode` parts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParamsView<N> {
+    /// Mandatory positional parameters.
+    pub requireds: Vec<N>,
+    /// Optional positional parameters.
+    pub optionals: Vec<N>,
+    /// Rest parameter (`RestParameterNode` or `ImplicitRestNode`).
+    pub rest: Option<N>,
+    /// Post (post-rest mandatory) parameters.
+    pub posts: Vec<N>,
+    /// Keyword parameters.
+    pub keywords: Vec<N>,
+    /// Keyword rest or forwarding parameter.
+    pub keyword_rest: Option<N>,
+    /// Block parameter (`BlockParameterNode`).
+    pub block: Option<N>,
+}
+
 /// Handler-facing node access. See the module docs.
 pub trait BackendNode: AstNode + Sized {
     /// Integer literal value.
@@ -252,6 +302,64 @@ pub trait BackendNode: AstNode + Sized {
 
     /// Embedded variable read (`EmbeddedVariableNode`).
     fn embedded_var(&self) -> Option<Self> {
+        None
+    }
+
+    /// Block parts (`BlockNode`).
+    fn block_view(&self) -> Option<BlockView<Self>> {
+        None
+    }
+
+    /// Lambda parts (`LambdaNode`).
+    fn lambda_view(&self) -> Option<LambdaView<Self>> {
+        None
+    }
+
+    /// `yield` parts (`YieldNode`); outer `None` is not a yield, inner
+    /// `None` is a bare `yield` without arguments.
+    fn yield_view(&self) -> Option<YieldView<Self>> {
+        None
+    }
+
+    /// `BlockParametersNode` parts.
+    fn block_param_view(&self) -> Option<BlockParamView<Self>> {
+        None
+    }
+
+    /// `ParametersNode` parts.
+    fn parameters_view(&self) -> Option<ParamsView<Self>> {
+        None
+    }
+
+    /// Required parameter name (`RequiredParameterNode`).
+    fn required_param_name(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Rest parameter name (`RestParameterNode`); outer `None` is not a
+    /// rest node, inner `None` is an anonymous `*`.
+    fn rest_param_name(&self) -> Option<Option<Vec<u8>>> {
+        None
+    }
+
+    /// Block-local name (`BlockLocalVariableNode`).
+    fn block_local_name(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Numbered parameters maximum (`NumberedParametersNode`).
+    fn numbered_max(&self) -> Option<u8> {
+        None
+    }
+
+    /// Block argument (`BlockArgumentNode`); outer `None` is not a block
+    /// argument, inner `None` is a bare `&`.
+    fn block_arg(&self) -> Option<Option<Self>> {
+        None
+    }
+
+    /// `it` read (`ItLocalVariableReadNode`).
+    fn it_read(&self) -> Option<()> {
         None
     }
 }

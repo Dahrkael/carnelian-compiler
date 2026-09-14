@@ -1,8 +1,8 @@
 //! `BackendNode` for borrowed nodes (thin access, no tree copies).
 
 use carnelian_ast::view::{
-    BackendNode, CallView, CaseView, IfView, IntegerLit, LvarRef, LvarWrite, ProgramView,
-    SimpleLit, WhenView, WhileView,
+    BackendNode, BlockParamView, BlockView, CallView, CaseView, IfView, IntegerLit, LambdaView,
+    LvarRef, LvarWrite, ParamsView, ProgramView, SimpleLit, WhenView, WhileView, YieldView,
 };
 use carnelian_ast::AstNode;
 
@@ -301,5 +301,90 @@ impl BackendNode for PrismNode<'_> {
     fn embedded_var(&self) -> Option<Self> {
         let node = self.inner.as_embedded_variable_node()?;
         Some(wrap(node.variable()))
+    }
+
+    fn block_view(&self) -> Option<BlockView<Self>> {
+        let node = self.inner.as_block_node()?;
+        Some(BlockView {
+            locals: node
+                .locals()
+                .iter()
+                .map(|id| id.as_slice().to_vec())
+                .collect(),
+            params: node.parameters().map(wrap),
+            body: node.body().map(wrap),
+        })
+    }
+
+    fn lambda_view(&self) -> Option<LambdaView<Self>> {
+        let node = self.inner.as_lambda_node()?;
+        Some(LambdaView {
+            locals: node
+                .locals()
+                .iter()
+                .map(|id| id.as_slice().to_vec())
+                .collect(),
+            params: node.parameters().map(wrap),
+            body: node.body().map(wrap),
+        })
+    }
+
+    fn yield_view(&self) -> Option<YieldView<Self>> {
+        let node = self.inner.as_yield_node()?;
+        Some(YieldView {
+            args: node.arguments().map(|arguments| wrap(arguments.as_node())),
+        })
+    }
+
+    fn block_param_view(&self) -> Option<BlockParamView<Self>> {
+        let node = self.inner.as_block_parameters_node()?;
+        Some(BlockParamView {
+            params: node
+                .parameters()
+                .map(|parameters| wrap(parameters.as_node())),
+            block_locals: wrap_many(node.locals()),
+        })
+    }
+
+    fn parameters_view(&self) -> Option<ParamsView<Self>> {
+        let node = self.inner.as_parameters_node()?;
+        Some(ParamsView {
+            requireds: wrap_many(node.requireds()),
+            optionals: wrap_many(node.optionals()),
+            rest: node.rest().map(wrap),
+            posts: wrap_many(node.posts()),
+            keywords: wrap_many(node.keywords()),
+            keyword_rest: node.keyword_rest().map(wrap),
+            block: node.block().map(|block| wrap(block.as_node())),
+        })
+    }
+
+    fn required_param_name(&self) -> Option<Vec<u8>> {
+        let node = self.inner.as_required_parameter_node()?;
+        Some(const_bytes(node.name()))
+    }
+
+    fn rest_param_name(&self) -> Option<Option<Vec<u8>>> {
+        let node = self.inner.as_rest_parameter_node()?;
+        Some(node.name().map(|id| id.as_slice().to_vec()))
+    }
+
+    fn block_local_name(&self) -> Option<Vec<u8>> {
+        let node = self.inner.as_block_local_variable_node()?;
+        Some(const_bytes(node.name()))
+    }
+
+    fn numbered_max(&self) -> Option<u8> {
+        let node = self.inner.as_numbered_parameters_node()?;
+        Some(node.maximum())
+    }
+
+    fn block_arg(&self) -> Option<Option<Self>> {
+        let node = self.inner.as_block_argument_node()?;
+        Some(node.expression().map(wrap))
+    }
+
+    fn it_read(&self) -> Option<()> {
+        self.inner.as_it_local_variable_read_node().map(|_| ())
     }
 }

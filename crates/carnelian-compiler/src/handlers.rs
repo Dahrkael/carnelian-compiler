@@ -101,6 +101,69 @@ impl Codegen {
         parent.reps.push(irep);
         Ok(parent.reps.len() - 1)
     }
+
+    /// Upvar lookup (`search_upvar`): walks parents by name, returning
+    /// the slot and the level count (`lv`).
+    fn search_upvar(&self, name: &[u8]) -> Result<(u16, u16), Diagnostic> {
+        let mut level: u16 = 0;
+        for index in (0..self.scopes.len().saturating_sub(1)).rev() {
+            let slot = self.scopes[index].lv_idx(name);
+            if slot > 0 {
+                return Ok((slot, level));
+            }
+            level = level.saturating_add(1);
+        }
+        let message = if name == b"&" {
+            "No anonymous block parameter"
+        } else if name == b"*" {
+            "No anonymous rest parameter"
+        } else if name == b"**" {
+            "No anonymous keyword rest parameter"
+        } else {
+            "Can't find local variables"
+        };
+        Err(Diagnostic {
+            message: message.to_owned(),
+            start: 0,
+            end: 0,
+        })
+    }
+
+    /// Method scope lookup for `yield` (`search_mscope`): walks while the
+    /// scope is not a method scope, counting levels. `ainfo` is `-1` when
+    /// no method scope exists (top-level `yield`).
+    fn search_mscope(&self) -> (i32, u16, u32) {
+        let mut level: u16 = 0;
+        let mut cursor: Option<usize> = Some(self.scopes.len() - 1);
+        while let Some(index) = cursor {
+            if self.scopes[index].mscope {
+                let scope = &self.scopes[index];
+                return (i32::from(scope.ainfo), level, scope.aspec);
+            }
+            level = level.saturating_add(1);
+            cursor = index.checked_sub(1);
+        }
+        (-1, level, 0)
+    }
+
+    /// `OP_BLKPUSH` operand (`mscope_operand`).
+    fn mscope_operand(ainfo: i32, level: u16) -> Result<u16, Diagnostic> {
+        if ainfo > 0xfff {
+            return Err(Diagnostic {
+                message: "too many formal arguments".to_owned(),
+                start: 0,
+                end: 0,
+            });
+        }
+        if level > 0xf {
+            return Err(Diagnostic {
+                message: "too many nested blocks/methods".to_owned(),
+                start: 0,
+                end: 0,
+            });
+        }
+        Ok(((ainfo as u16) << 4) | level)
+    }
 }
 
 impl Default for Codegen {
@@ -208,6 +271,11 @@ pub fn codegen<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(
         "OrNode" => gen_logic(cg, node, val, true),
         "LocalVariableReadNode" => gen_lvar_read(cg, node, val),
         "LocalVariableWriteNode" => gen_lvar_write(cg, node, val),
+        "ItLocalVariableReadNode" => gen_it_read(cg, node, val),
+        "BlockNode" => gen_block(cg, node, val),
+        "LambdaNode" => gen_lambda(cg, node, val),
+        "YieldNode" => gen_yield(cg, node, val),
+        "BlockArgumentNode" => gen_block_arg(cg, node, val),
         "TrueNode" | "FalseNode" | "NilNode" | "SelfNode" => gen_simple(cg, node, val),
         _ => Err(unsupported(&node, "node")),
     }
@@ -372,17 +440,22 @@ fn gen_lvar_read<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result
     let Some(target) = node.lvar_read() else {
         return Err(unsupported(&node, "variable read"));
     };
-    let (session, scope) = cg.current();
-    let depth = target.depth + u32::from(scope.for_depth);
+    let depth = target.depth + u32::from(cg.scopes.last().expect("open scope").for_depth);
     if depth == 0 {
+        let (session, scope) = cg.current();
         let dst = scope.cursp();
         let index = scope.lv_idx(&target.name);
         // Note the set peephole flag (`gen_move(..., 1)`).
         scope.gen_move(session, dst, index, true)?;
+        scope.push_n(1)
     } else {
-        return Err(unsupported(&node, "upvar read"));
+        // Upvar read (`gen_lvar` else branch): search by name, `GETUPVAR`.
+        let (slot, level) = cg.search_upvar(&target.name)?;
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.gen_getupvar(session, dst, slot, level)?;
+        scope.push_n(1)
     }
-    scope.push_n(1)
 }
 
 fn gen_lvar_write<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
@@ -393,13 +466,23 @@ fn gen_lvar_write<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Resul
         return Err(unsupported(&node, "bare write target"));
     };
     codegen(cg, rhs, true)?;
+    let depth = target.depth + u32::from(cg.scopes.last().expect("open scope").for_depth);
+    if depth != 0 {
+        // Upvar write (`gen_assignment_lvar` else branch): `SETUPVAR`.
+        let (slot, level) = cg.search_upvar(&target.name)?;
+        let (session, scope) = cg.current();
+        scope.pop_n(1)?;
+        let dst = scope.cursp();
+        scope.gen_setupvar(session, dst, slot, level, val)?;
+        if val {
+            let (_, scope) = cg.current();
+            scope.push_n(1)?;
+        }
+        return Ok(());
+    }
     let (session, scope) = cg.current();
     scope.pop_n(1)?;
     let sp = scope.cursp();
-    let depth = target.depth + u32::from(scope.for_depth);
-    if depth != 0 {
-        return Err(unsupported(&node, "upvar write"));
-    }
     let index = scope.lv_idx(&target.name);
     if index != sp {
         scope.gen_move(session, index, sp, val)?;
@@ -407,6 +490,351 @@ fn gen_lvar_write<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Resul
     if val {
         let (_, scope) = cg.current();
         scope.push_n(1)?;
+    }
+    Ok(())
+}
+
+/// `it` read (`PM_IT_LOCAL_VARIABLE_READ_NODE`): `it` lives at slot 1.
+fn gen_it_read<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    if !val {
+        return Ok(());
+    }
+    let Some(()) = node.it_read() else {
+        return Err(unsupported(&node, "it read"));
+    };
+    let (session, scope) = cg.current();
+    let dst = scope.cursp();
+    scope.gen_move(session, dst, 1, true)?;
+    scope.push_n(1)
+}
+
+/// `&` block argument (`PM_BLOCK_ARGUMENT_NODE`).
+fn gen_block_arg<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(inner) = node.block_arg() else {
+        return Err(unsupported(&node, "block argument"));
+    };
+    match inner {
+        None => {
+            // Bare `&`: load the `&` local (or upvar when forwarded).
+            let slot = cg.current().1.lv_idx(b"&");
+            if slot > 0 {
+                let (session, scope) = cg.current();
+                let dst = scope.cursp();
+                scope.gen_move(session, dst, slot, val)?;
+                if val {
+                    scope.push_n(1)?;
+                }
+            } else {
+                let (slot, level) = cg.search_upvar(b"&")?;
+                let (session, scope) = cg.current();
+                let dst = scope.cursp();
+                scope.gen_getupvar(session, dst, slot, level)?;
+                if val {
+                    scope.push_n(1)?;
+                }
+            }
+            Ok(())
+        }
+        Some(expr) => codegen(cg, expr, val),
+    }
+}
+
+/// `MRC_ARGS_REQ(n)` (`codegen.c` aspec layout).
+fn args_req(count: usize) -> u32 {
+    ((count as u32) & 0x1f) << 18
+}
+
+/// `MRC_ARGS_REST()` (`codegen.c` aspec layout).
+fn args_rest() -> u32 {
+    1 << 12
+}
+
+/// Plain block body (`BlockNode`): child scope with `OP_BLOCK`.
+fn gen_block<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    if !val {
+        return Ok(());
+    }
+    let Some(view) = node.block_view() else {
+        return Err(unsupported(&node, "block"));
+    };
+    gen_lambda_body(
+        cg,
+        view.locals,
+        view.params,
+        view.body,
+        opcode::OP_BLOCK,
+        &node,
+    )
+}
+
+/// Lambda literal (`LambdaNode`): child scope with `OP_LAMBDA`.
+fn gen_lambda<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    if !val {
+        return Ok(());
+    }
+    let Some(view) = node.lambda_view() else {
+        return Err(unsupported(&node, "lambda"));
+    };
+    gen_lambda_body(
+        cg,
+        view.locals,
+        view.params,
+        view.body,
+        opcode::OP_LAMBDA,
+        &node,
+    )
+}
+
+/// Shared `lambda_body` for blocks and lambdas (`blk = 1`).
+/// Covers empty, plain `|x|`, `|x, y|`, `|*a|` (named or anonymous),
+/// numbered (`_1`) and `it` forms; optional, post, keyword, block and
+/// destructured parameters are gated with diagnostics.
+fn gen_lambda_body<N: BackendNode>(
+    cg: &mut Codegen,
+    locals: Vec<Vec<u8>>,
+    params: Option<N>,
+    body: Option<N>,
+    op: u8,
+    site: &N,
+) -> Result<(), Diagnostic> {
+    let mut lv: Vec<Vec<u8>> = Vec::new();
+    let (ainfo, aspec) = match params {
+        None => {
+            // Empty block: placeholder plus declared locals.
+            lv.push(Vec::new());
+            for name in &locals {
+                if !lv.contains(name) {
+                    lv.push(name.clone());
+                }
+            }
+            (0, args_req(0))
+        }
+        Some(holder) => match holder.kind_name() {
+            "NumberedParametersNode" => {
+                let Some(max) = holder.numbered_max() else {
+                    return Err(unsupported(site, "numbered parameters"));
+                };
+                let count = usize::from(max);
+                for index in 0..count {
+                    lv.push(format!("_{}", index + 1).into_bytes());
+                }
+                for name in &locals {
+                    if !lv.contains(name) {
+                        lv.push(name.clone());
+                    }
+                }
+                let info = (u16::from(max) & 0x3f) << 7;
+                (info, args_req(count))
+            }
+            "ItParametersNode" => {
+                lv.push(Vec::new());
+                for name in &locals {
+                    if !lv.contains(name) {
+                        lv.push(name.clone());
+                    }
+                }
+                (1 << 7, args_req(1))
+            }
+            "BlockParametersNode" => {
+                let Some(view) = holder.block_param_view() else {
+                    return Err(unsupported(site, "block parameters"));
+                };
+                let mut semi: Vec<Vec<u8>> = Vec::new();
+                for local in view.block_locals {
+                    let Some(name) = local.block_local_name() else {
+                        return Err(unsupported(site, "block local"));
+                    };
+                    semi.push(name);
+                }
+                let Some(inner) = view.params else {
+                    // `||` or `|;local|`: no positional layout.
+                    lv.push(Vec::new());
+                    for name in locals.iter().chain(semi.iter()) {
+                        if !lv.contains(name) {
+                            lv.push(name.clone());
+                        }
+                    }
+                    return enter_block_scope(cg, lv, 0, args_req(0), body, op);
+                };
+                if inner.kind_name() != "ParametersNode" {
+                    return Err(unsupported(site, "block parameters"));
+                }
+                let Some(view) = inner.parameters_view() else {
+                    return Err(unsupported(site, "block parameters"));
+                };
+                if !view.optionals.is_empty() {
+                    return Err(unsupported(site, "block optional parameter"));
+                }
+                if !view.posts.is_empty() {
+                    return Err(unsupported(site, "block post parameter"));
+                }
+                if !view.keywords.is_empty() || view.keyword_rest.is_some() {
+                    return Err(unsupported(site, "block keyword parameter"));
+                }
+                if view.block.is_some() {
+                    return Err(unsupported(site, "block block parameter"));
+                }
+                let mut required_names: Vec<Vec<u8>> = Vec::new();
+                for item in &view.requireds {
+                    let Some(name) = item.required_param_name() else {
+                        return Err(unsupported(site, "block destructuring"));
+                    };
+                    required_names.push(name);
+                }
+                let mut rest_name: Option<Vec<u8>> = None;
+                if let Some(rest) = &view.rest {
+                    match rest.kind_name() {
+                        "RestParameterNode" => {
+                            let Some(maybe) = rest.rest_param_name() else {
+                                return Err(unsupported(site, "block rest parameter"));
+                            };
+                            rest_name = Some(maybe.unwrap_or_else(|| b"*".to_vec()));
+                        }
+                        "ImplicitRestNode" => {
+                            rest_name = Some(b"*".to_vec());
+                        }
+                        _ => return Err(unsupported(site, "block rest parameter")),
+                    }
+                }
+                if required_names.len() > 0x1f {
+                    return Err(Diagnostic {
+                        message: "too many formal arguments".to_owned(),
+                        start: 0,
+                        end: 0,
+                    });
+                }
+                let ma = required_names.len();
+                let ra = u16::from(rest_name.is_some());
+                lv.extend(required_names);
+                if let Some(name) = rest_name {
+                    lv.push(name);
+                }
+                lv.push(Vec::new());
+                for name in locals.iter().chain(semi.iter()) {
+                    if !lv.contains(name) {
+                        lv.push(name.clone());
+                    }
+                }
+                let info = (((ma as u16) & 0x3f) << 7) | (ra << 6);
+                let spec = args_req(ma) | if ra == 1 { args_rest() } else { 0 };
+                (info, spec)
+            }
+            _ => return Err(unsupported(site, "block parameters")),
+        },
+    };
+    enter_block_scope(cg, lv, ainfo, aspec, body, op)
+}
+
+/// Pushes the child scope, emits `OP_ENTER`, codes the body and emits
+/// `OP_BLOCK`/`OP_LAMBDA` in the parent (`lambda_body` tail with `blk`).
+fn enter_block_scope<N: BackendNode>(
+    cg: &mut Codegen,
+    lv: Vec<Vec<u8>>,
+    ainfo: u16,
+    aspec: u32,
+    body: Option<N>,
+    op: u8,
+) -> Result<(), Diagnostic> {
+    let child = Scope::child(&mut cg.session, cg.scopes.last().expect("open scope"), &lv)?;
+    cg.scopes.push(child);
+    {
+        let scope = cg.scopes.last_mut().expect("block scope");
+        scope.ainfo = ainfo;
+        scope.aspec = aspec;
+        scope.mscope = false;
+        scope.for_depth = 0;
+    }
+    {
+        let (_, scope) = cg.current();
+        scope.genop_w(opcode::OP_ENTER, aspec)?;
+    }
+    {
+        let (_, scope) = cg.current();
+        scope.loop_push(LoopType::Block);
+        let label = scope.new_label();
+        scope.loops.last_mut().expect("block loop").pc0 = label;
+    }
+    match body {
+        Some(node) => codegen(cg, node, true)?,
+        None => {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+            scope.push_n(1)?;
+        }
+    }
+    cg.current().1.pop_n(1)?;
+    {
+        // `ENTER` always precedes, so `pc > 0` holds like in C.
+        let (session, scope) = cg.current();
+        let ret = scope.cursp();
+        scope.gen_return(session, opcode::OP_RETURN, ret)?;
+    }
+    {
+        let (session, scope) = cg.current();
+        scope.loop_pop(session, false)?;
+    }
+    let index = cg.pop_scope()?;
+    let child_index = u16::try_from(index).map_err(|_| too_complex())?;
+    let (session, scope) = cg.current();
+    let dst = scope.cursp();
+    scope.genop_2(session, op, dst, child_index)?;
+    scope.push_n(1)
+}
+
+/// `yield` (`PM_YIELD_NODE`): `BLKPUSH` plus `BLKCALL` for plain
+/// positional arguments. Keyword and splat forms stay gated like calls.
+fn gen_yield<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(view) = node.yield_view() else {
+        return Err(unsupported(&node, "yield"));
+    };
+    let (ainfo, level, _aspec) = cg.search_mscope();
+    if ainfo < 0 {
+        return Err(Diagnostic {
+            message: "invalid yield (SyntaxError)".to_owned(),
+            start: node.span().start,
+            end: node.span().end,
+        });
+    }
+    let operand = Codegen::mscope_operand(ainfo, level)?;
+    cg.current().1.push_n(1)?;
+    let mut count: i32 = 0;
+    let mut have = 0;
+    if let Some(args) = view.args {
+        let Some(items) = args.call_args() else {
+            return Err(unsupported(&node, "complex arguments"));
+        };
+        if !items.is_empty() {
+            count = gen_values(cg, items, true, CALL_ARG_LIMIT)?;
+            if count < 0 {
+                count = 15;
+                have = 1;
+                cg.current().1.push_n(1)?;
+            } else {
+                have = count;
+            }
+        }
+    }
+    {
+        let (_, scope) = cg.current();
+        scope.push_n(1)?;
+        scope.pop_n(1)?;
+        scope.pop_n((have as u16).checked_add(1).ok_or_else(too_complex)?)?;
+    }
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_2s(session, opcode::OP_BLKPUSH, dst, operand)?;
+    }
+    {
+        // Plain path only (`nk == 0 && n < 15`); keyword and splat
+        // arguments are gated above via `call_args`.
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_BLKCALL, dst, count as u16)?;
+    }
+    if val {
+        cg.current().1.push_n(1)?;
     }
     Ok(())
 }
@@ -631,8 +1059,14 @@ fn gen_call<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), 
             }
         }
     }
-    if view.block.is_some() {
-        return Err(unsupported(&node, "block argument"));
+    let mut blk = false;
+    if let Some(block) = view.block {
+        // Literal blocks and `&` block args share the `SENDB` path
+        // (`gen_call` codes the block `VAL`, then pops it).
+        codegen(cg, block, true)?;
+        cg.current().1.pop_n(1)?;
+        noop = true;
+        blk = true;
     }
     {
         let (_, scope) = cg.current();
@@ -640,7 +1074,7 @@ fn gen_call<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), 
         scope.pop_n(1)?;
         scope.sp = sp_save;
     }
-    emit_call(cg, noself, noop, &name, nargs, val, safe, skip)
+    emit_call(cg, noself, noop, blk, &name, nargs, val, safe, skip)
 }
 
 /// Direct single-operand operator selection (`*`, `/`, comparisons).
@@ -663,6 +1097,7 @@ fn emit_call(
     cg: &mut Codegen,
     noself: bool,
     noop: bool,
+    blk: bool,
     name: &[u8],
     nargs: i32,
     val: bool,
@@ -681,12 +1116,12 @@ fn emit_call(
         } else if gen_binop(cg, name, dst)? {
             // An index opcode was emitted.
         } else {
-            send_call(cg, noself, name, nargs, dst)?;
+            send_call(cg, noself, blk, name, nargs, dst)?;
         }
     } else if !noop && nargs == 0 && gen_uniop(cg, name, dst)? {
         // A literal absorbed its sign.
     } else {
-        send_call(cg, noself, name, nargs, dst)?;
+        send_call(cg, noself, blk, name, nargs, dst)?;
     }
     if safe {
         cg.current().1.dispatch(skip)?;
@@ -697,10 +1132,11 @@ fn emit_call(
     Ok(())
 }
 
-/// Generic `SEND`/`SSEND` emission.
+/// Generic `SEND`/`SSEND` emission (`SENDB`/`SSENDB` when a block is present).
 fn send_call(
     cg: &mut Codegen,
     noself: bool,
+    blk: bool,
     name: &[u8],
     nargs: i32,
     dst: u16,
@@ -711,15 +1147,19 @@ fn send_call(
     };
     if noself {
         let (session, scope) = cg.current();
-        if nargs == 0 {
+        if !blk && nargs == 0 {
             scope.genop_2(session, opcode::OP_SSEND0, dst, sym)?;
+        } else if blk {
+            scope.genop_3(session, opcode::OP_SSENDB, dst, sym, nargs as u8)?;
         } else {
             scope.genop_3(session, opcode::OP_SSEND, dst, sym, nargs as u8)?;
         }
     } else {
         let (session, scope) = cg.current();
-        if nargs == 0 {
+        if !blk && nargs == 0 {
             scope.genop_2(session, opcode::OP_SEND0, dst, sym)?;
+        } else if blk {
+            scope.genop_3(session, opcode::OP_SENDB, dst, sym, nargs as u8)?;
         } else {
             scope.genop_3(session, opcode::OP_SEND, dst, sym, nargs as u8)?;
         }

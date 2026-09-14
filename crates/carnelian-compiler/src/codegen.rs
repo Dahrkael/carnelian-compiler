@@ -79,6 +79,12 @@ pub struct Scope {
     pub lastpc: u32,
     /// Most recent jump target (peephole barrier).
     pub lastlabel: u32,
+    /// Argument layout for `OP_BLKPUSH` (`ainfo`, 15 bits).
+    pub ainfo: u16,
+    /// True for method scopes (`def`); blocks leave it false.
+    pub mscope: bool,
+    /// Operand of this scope's `OP_ENTER` (`aspec`).
+    pub aspec: u32,
     /// Emitted bytecode.
     pub iseq: Vec<u8>,
     /// Constant pool under construction.
@@ -152,6 +158,9 @@ impl Scope {
             pc: 0,
             lastpc: 0,
             lastlabel: 0,
+            ainfo: 0,
+            mscope: false,
+            aspec: 0,
             iseq: Vec::new(),
             pool: Vec::new(),
             syms: Vec::new(),
@@ -186,6 +195,9 @@ impl Scope {
             pc: 0,
             lastpc: 0,
             lastlabel: 0,
+            ainfo: 0,
+            mscope: false,
+            aspec: 0,
             iseq: Vec::with_capacity(1024),
             pool: Vec::with_capacity(32),
             syms: Vec::with_capacity(256),
@@ -824,6 +836,49 @@ impl Scope {
             .position(|known| known == name)
             .map(|index| index as u16 + 1)
             .unwrap_or(0)
+    }
+
+    /// Upvar load (`gen_getupvar`): skips a `GETUPVAR` right after a
+    /// matching `SETUPVAR`.
+    pub fn gen_getupvar(
+        &mut self,
+        session: &Session,
+        dst: u16,
+        idx: u16,
+        lv: u16,
+    ) -> Result<(), Diagnostic> {
+        if !self.no_peephole(session) {
+            let data = self.last_insn();
+            if data.insn == opcode::OP_SETUPVAR
+                && data.a == u32::from(dst)
+                && data.b == idx
+                && data.cc == lv
+            {
+                return Ok(());
+            }
+        }
+        self.genop_3(session, opcode::OP_GETUPVAR, dst, idx, lv as u8)
+    }
+
+    /// Upvar store (`gen_setupvar`): folds a preceding `MOVE dst, src`
+    /// into the store when the value is discarded.
+    pub fn gen_setupvar(
+        &mut self,
+        session: &Session,
+        dst: u16,
+        idx: u16,
+        lv: u16,
+        val: bool,
+    ) -> Result<(), Diagnostic> {
+        let mut target = dst;
+        if !val && !self.no_peephole(session) {
+            let data = self.last_insn();
+            if data.insn == opcode::OP_MOVE && data.a == u32::from(dst) {
+                target = data.b;
+                self.pc = self.lastpc;
+            }
+        }
+        self.genop_3(session, opcode::OP_SETUPVAR, target, idx, lv as u8)
     }
 
     /// Grow the pool and return the fresh slot (`lit_pool_extend`).
