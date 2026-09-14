@@ -166,16 +166,32 @@ Reference probe results (pinned `mruby-compiler2 0.5.0`):
   - `case/in` pattern matching (`codegen_pattern`, ~1000 lines of
     failure-jump chaining and caching) — out of scope for this branch,
     belongs to P2.6-pattern.
+- Corners closed after the first pass (same worktree):
   - Nested destructured parameters (`def foo((a, (b, c)))`): the reference
     emits bytes derived from an unchecked C cast (the inner multi's
-    `lefts.size` misread as a pool id, e.g. `<<` for two lefts).
-    Replicating that deliberate garbage in safe Rust was declined; the gate
-    stands until upstream fixes the cast or the pin changes.
-  - `defined?` with a back-reference receiver (`defined?($&.foo)`):
-    needs the operand twice (check plus receiver value); the generic
-    `BackendNode` has no `Clone`. Vanishingly rare; gate stands.
-  - Call-side `...` forwarding (`bar(...)`): `ARGARY` transport in calls,
-    separate from definition-side support.
+    `lefts.size` misread as a pool id). The ids land on presymbols for any
+    realistic arity (verified `<<` for two lefts, `>>` for three), so the
+    port maps the size through the pinned `mrc_presym.inc` table
+    (`presym_bytes`); sizes past the table stay gated. Proven by
+    `def_destructure_nested*` goldens.
+  - `defined?` with a back-reference receiver (`defined?($&.foo)`): needs
+    the operand twice (receiver check plus receiver value). `PrismNode`
+    gained a generated `Clone` (build-script `clone_node` over the config
+    node list, so pin bumps stay exhaustive-checked) and `BackendNode` a
+    `Clone` bound; the receiver arm now codes the check plus the value
+    like C.
+  - `...` (like splats/keywords before it) in a `recv_ready` chain link
+    (`defined?(o.b(...).c)`, same family as the gated
+    `defined?(x.foo(*a).bar)`): the reference compiles it, the port gates
+    it as complex arguments. Fail-closed and rare; threading `recv_ready`
+    through gathered-argument calls is deferred.
+  - Call-side `...` forwarding (`bar(...)`, `bar(1, ...)`, `super(...)`):
+    `gen_values` forwarding arm (`ARGCAT`/`HASH`/`HASHCAT` plus `&`) with
+    upvar fallback (`gen_forward_arg`), and calls force the block shape
+    with a literal `0xFF` operand (`FORWARD_ARGS`). `...` mixed with other
+    declared parameters (`def foo(a, b: 1, ...)`) is rejected at parse
+    level by both prisms ("unexpected parameter order"), so no golden can
+    exist there either.
 
 ## Reviewer round on P2-params (applied, same worktree)
 
@@ -191,3 +207,19 @@ Reference probe results (pinned `mruby-compiler2 0.5.0`):
   with a static table (pre-existing, equivalent output); comments noting
   gates and reference workarounds (file convention; decisions also live
   here); non-zero diagnostic offsets (file convention is `0, 0` for these).
+
+## Reviewer round on the tiny corners (applied, same worktree)
+
+- No byte-divergence bugs found; all suites pass, clippy clean, wasm32
+  build passes. The 57-entry presym table was verified byte-for-byte
+  against `mrc_presym.inc`; the `0xFF` operand, super forwarding flow,
+  backref triple-use and fail-closed agreement (index/yield/`...`-mix
+  parse rejections on both sides) all check out.
+- Applied: goldens for `def foo(a = 1, ...)` forwarding, `bar(*a, ...)`
+  splat-plus-forwarding, rest inside nested multis, chained/splat
+  backref receivers and block-scoped `super(...)`; doc fixes for
+  `SuperView`/`call_args`; progress-note correction (two evaluations,
+  not three) plus the `recv_ready` forwarding gap line.
+- Declined with reason: threading `recv_ready` through gathered-argument
+  calls (deferred; same fail-closed family as the pre-existing splat
+  chain gate).

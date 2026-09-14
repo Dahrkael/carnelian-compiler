@@ -91,6 +91,26 @@ const SNIPPETS: &[(&str, &str)] = &[
         "def_destructure_splat",
         "def foo((a, *b))\n  a\nend\nputs foo([1, 2, 3])\n",
     ),
+    (
+        "def_destructure_nested",
+        "def foo(a, (b, (c, d)))\n  a + b + c + d\nend\nputs foo(1, [2, [3, 4]])\n",
+    ),
+    (
+        "def_destructure_nested_wide",
+        "def foo((a, (b, c, d)))\n  a\nend\nputs foo([1, [2, 3, 4]])\n",
+    ),
+    (
+        "def_destructure_nested_deep",
+        "def foo((a, (b, (c, d))))\n  a + b + c + d\nend\nputs foo([1, [2, [3, 4]]])\n",
+    ),
+    (
+        "def_destructure_nested_post",
+        "def foo(x, *y, (a, (b, c)))\n  a + b + c\nend\nputs foo(1, 2, [3, [4, 5]])\n",
+    ),
+    (
+        "def_destructure_nested_rest",
+        "def foo((a, (b, *c)))\n  b\nend\nputs foo([1, [2, 3, 4]])\n",
+    ),
     ("def_endless_optional", "def foo(a = 1, &b) = a\nputs foo\n"),
     (
         "def_mixed",
@@ -102,11 +122,6 @@ const SNIPPETS: &[(&str, &str)] = &[
 /// Deferred syntax: compilation must fail with a diagnostic, and must never
 /// emit bytes that diverge from the reference.
 const GATED: &[(&str, &str, &str)] = &[
-    (
-        "def_nested_destructure_gated",
-        "def foo(a, (b, (c, d)))\n  a\nend\nputs foo(1, [2, [3, 4]])\n",
-        "DefNode",
-    ),
     ("ivar_op_gated", "@x = 1\n@x += 1\nputs @x\n", "InstanceVariableOperatorWriteNode"),
     (
         "ivar_or_gated",

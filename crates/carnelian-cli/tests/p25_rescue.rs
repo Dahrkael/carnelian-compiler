@@ -66,6 +66,47 @@ const SNIPPETS: &[(&str, &str)] = &[
     ("call_splat_tail", "a = [1, 2]\nf(*a, 3)\n"),
     ("call_splat_multi", "a = [1]\nb = [2]\nf(*a, *b)\n"),
     ("call_splat_kw", "a = [1]\nf(*a, k: 2)\n"),
+    // `...` forwarding calls
+    (
+        "call_forward",
+        "def foo(...)\n  bar(...)\nend\ndef bar(*a)\n  a\nend\nputs foo(1, 2)\n",
+    ),
+    (
+        "call_forward_args",
+        "def foo(...)\n  bar(1, ...)\nend\ndef bar(*a)\n  a\nend\nputs foo(2)\n",
+    ),
+    (
+        "call_forward_kwargs",
+        "def foo(a, ...)\n  bar(...)\nend\ndef bar(*a)\n  a\nend\nputs foo(1, 2, k: 3)\n",
+    ),
+    (
+        "call_forward_optional",
+        "def foo(a = 1, ...)\n  bar(...)\nend\ndef bar(*a)\n  a\nend\nputs foo(2, 3)\n",
+    ),
+    (
+        "call_forward_splat",
+        "def foo(...)\n  bar(*a, ...)\nend\ndef bar(*a)\n  a\nend\na = [1]\nputs foo(2)\n",
+    ),
+    (
+        "call_forward_block",
+        "def foo(...)\n  [1].each { bar(...) }\nend\ndef bar(*a)\n  puts a[0]\nend\nfoo(9)\n",
+    ),
+    (
+        "call_forward_self",
+        "def foo(...)\n  self.bar(...)\nend\ndef bar(*a)\n  a\nend\nputs foo(1)\n",
+    ),
+    (
+        "super_forward_args",
+        "class A25f\n  def foo(*a)\n    a\n  end\nend\nclass B25f < A25f\n  def foo(...)\n    super(...)\n  end\nend\nputs B25f.new.foo(1)\n",
+    ),
+    (
+        "super_forward_mixed",
+        "class A25g\n  def foo(*a)\n    a\n  end\nend\nclass B25g < A25g\n  def foo(...)\n    super(1, ...)\n  end\nend\nputs B25g.new.foo(2)\n",
+    ),
+    (
+        "super_forward_block",
+        "class A25h\n  def foo(*a)\n    a\n  end\nend\nclass B25h < A25h\n  def foo(...)\n    [1].each { super(...) }\n  end\nend\nputs B25h.new.foo(1)\n",
+    ),
     // array splats
     ("array_splat_only", "a = [1, 2]\nx = [*a]\nputs x\n"),
     ("array_splat_lead", "a = [1, 2]\nx = [*a, 3]\nputs x\n"),
