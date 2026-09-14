@@ -134,6 +134,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "carnelian-front-owned"
+version = "0.1.0"
+dependencies = [
+ "carnelian-ast",
+ "carnelian-front-prism",
+ "ruby-prism",
+ "ruby-prism-sys",
+]
+
+[[package]]
 name = "carnelian-front-prism"
 version = "0.1.0"
 dependencies = [
