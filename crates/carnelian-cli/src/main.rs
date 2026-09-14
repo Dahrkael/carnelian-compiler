@@ -1,8 +1,8 @@
 //! `carnelian` developer CLI.
 //!
 //! Certification runs through this binary: `reference` emits the pinned C
-//! golden, `verify` round-trips it through the pure-Rust writer and compares
-//! bytes. `compile` is a P0 stub (no codegen yet).
+//! golden, `compile --frontend prism` runs the Rust codegen, and `verify`
+//! compares both byte for byte in stripped and unstripped modes.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -12,11 +12,7 @@ use clap::{Parser, Subcommand};
 const PINS: &str = include_str!("../../../PINS.md");
 
 #[derive(Debug, Parser)]
-#[command(
-    name = "carnelian",
-    version,
-    about = "Ruby -> RITE compiler (P0 skeleton)"
-)]
+#[command(name = "carnelian", version, about = "Ruby -> RITE compiler")]
 struct Cli {
     /// Print the compatibility tuple and exit.
     #[arg(long)]
@@ -28,7 +24,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Compile Ruby source (P0 stub: reports unimplemented).
+    /// Compile Ruby source with the Rust codegen.
     Compile {
         /// Source file (`-` reads stdin).
         input: PathBuf,
@@ -50,13 +46,11 @@ enum Command {
         #[arg(short, long)]
         output: PathBuf,
     },
-    /// Round-trip `reference` through the Rust writer and compare bytes.
+    /// Compare `compile` against `reference`, byte for byte, in both strip
+    /// modes (both must match the same flags-`0` golden).
     Verify {
         /// Source file (`-` reads stdin).
         input: PathBuf,
-        /// Accepted for P1 parity; the C reference emits flags `0`.
-        #[arg(long)]
-        strip: bool,
     },
 }
 
@@ -84,14 +78,13 @@ fn reference_bytes(source: &str) -> Result<Vec<u8>, String> {
 }
 
 fn first_divergence(a: &[u8], b: &[u8]) -> Option<usize> {
-    let common = a.len().min(b.len());
-    for (index, (x, y)) in a.iter().zip(b.iter()).enumerate().take(common) {
+    for (index, (x, y)) in a.iter().zip(b.iter()).enumerate() {
         if x != y {
             return Some(index);
         }
     }
     if a.len() != b.len() {
-        return Some(common);
+        return Some(a.len().min(b.len()));
     }
     None
 }
@@ -245,7 +238,7 @@ fn main() {
             frontend,
         }) => cmd_compile(input, output, *strip, frontend),
         Some(Command::Reference { input, output }) => cmd_reference(input, output),
-        Some(Command::Verify { input, strip: _ }) => cmd_verify(input),
+        Some(Command::Verify { input }) => cmd_verify(input),
     };
     std::process::exit(code);
 }
