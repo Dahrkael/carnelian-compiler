@@ -16,6 +16,38 @@ use crate::CompileOptions;
 /// uses 14 at call sites, 64 for a bare `0` limit).
 const CALL_ARG_LIMIT: usize = 14;
 const LIT_ARY_MAX: usize = 64;
+const VAL_STACK_MAX: u32 = 99;
+/// Stack threshold before flushing pending hash pairs: `GEN_VAL_STACK_MAX`,
+/// lifted past `INT16_MAX` once the cursor itself is past the small limit
+/// (kept separate so the future `gen_values` flush can share it).
+fn val_stack_limit(cursp: u16) -> u32 {
+    if cursp >= LIT_ARY_MAX as u16 {
+        i16::MAX as u32
+    } else {
+        VAL_STACK_MAX
+    }
+}
+
+/// Counts as pool operands without silent truncation (the `sp` accounting in
+/// `push_n` errors first in practice).
+fn too_complex() -> Diagnostic {
+    Diagnostic {
+        message: "too complex expression".to_owned(),
+        start: 0,
+        end: 0,
+    }
+}
+
+fn count_u16(count: i32) -> Result<u16, Diagnostic> {
+    u16::try_from(count).map_err(|_| too_complex())
+}
+
+fn pair_pop(len: i32, extra: u16) -> Result<u16, Diagnostic> {
+    count_u16(len)?
+        .checked_mul(2)
+        .and_then(|doubled| doubled.checked_add(extra))
+        .ok_or_else(too_complex)
+}
 
 /// Scopes stack plus session and finished root.
 pub struct Codegen {
@@ -124,15 +156,20 @@ fn gen_branch<N: BackendNode>(
     match items {
         None => {
             if val {
-                let (session, scope) = cg.current();
-                let dst = scope.cursp();
-                scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
-                scope.push_n(1)?;
+                emit_absent_else(cg)?;
             }
             Ok(())
         }
         Some(list) => gen_list(cg, list, val),
     }
+}
+
+/// A missing `else` clause where presence is implied by `val`.
+fn emit_absent_else(cg: &mut Codegen) -> Result<(), Diagnostic> {
+    let (session, scope) = cg.current();
+    let dst = scope.cursp();
+    scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+    scope.push_n(1)
 }
 
 /// Main dispatch (`codegen()` switch).
@@ -156,6 +193,16 @@ pub fn codegen<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(
         "CallNode" => gen_call(cg, node, val),
         "IfNode" | "UnlessNode" => gen_if(cg, node, val),
         "ArrayNode" => gen_array(cg, node, val),
+        "HashNode" | "KeywordHashNode" => gen_hash_lit(cg, node, val),
+        "CaseNode" => gen_case(cg, node, val),
+        "InterpolatedStringNode" => gen_interp_string(cg, node, val),
+        "EmbeddedStatementsNode" => gen_branch(cg, node.embedded_body(), val),
+        "EmbeddedVariableNode" => {
+            let Some(variable) = node.embedded_var() else {
+                return Err(unsupported(&node, "embedded variable"));
+            };
+            codegen(cg, variable, val)
+        }
         "WhileNode" | "UntilNode" => gen_while(cg, node, val),
         "AndNode" => gen_logic(cg, node, val, false),
         "OrNode" => gen_logic(cg, node, val, true),
@@ -253,6 +300,50 @@ fn gen_symbol<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<()
     let (session, scope) = cg.current();
     let index = scope.new_sym(session, &bytes)?;
     emit_load2(cg, opcode::OP_LOADSYM, index)
+}
+
+/// Interpolated string (`PM_INTERPOLATED_STRING_NODE`): `STRING` parts
+/// joined with `STRCAT`, with a leading empty literal unless the first part
+/// is already a string (so `STRCAT` never mutates a shared literal).
+fn gen_interp_string<N: BackendNode>(
+    cg: &mut Codegen,
+    node: N,
+    val: bool,
+) -> Result<(), Diagnostic> {
+    let Some(parts) = node.string_parts() else {
+        return Err(unsupported(&node, "interpolated string"));
+    };
+    let Some(first) = parts.first() else {
+        return Err(unsupported(&node, "empty interpolated string"));
+    };
+    let str_begin = first.kind_name() != "StringNode";
+    if val {
+        if str_begin {
+            let (session, scope) = cg.current();
+            let index = scope.new_lit_str(session, b"")? as u16;
+            emit_load2(cg, opcode::OP_STRING, index)?;
+        }
+        for (index, part) in parts.into_iter().enumerate() {
+            codegen(cg, part, true)?;
+            cg.current().1.pop_n(1)?;
+            if str_begin || index > 0 {
+                let (session, scope) = cg.current();
+                scope.pop_n(1)?;
+                let dst = scope.cursp();
+                scope.genop_1(session, opcode::OP_STRCAT, dst)?;
+            }
+            cg.current().1.push_n(1)?;
+        }
+    } else {
+        // String parts need no runtime value; only embedded code may have
+        // side effects, and a `NOVAL` codegen leaves nothing to pop.
+        for part in parts {
+            if part.kind_name() != "StringNode" {
+                codegen(cg, part, false)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn gen_simple<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
@@ -705,12 +796,7 @@ fn gen_if<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Di
                 // A missing clause here implies `val` (see the guard above).
                 match view.else_body {
                     Some(else_body) => codegen(cg, else_body, val)?,
-                    None => {
-                        let (session, scope) = cg.current();
-                        let dst = scope.cursp();
-                        scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
-                        scope.push_n(1)?;
-                    }
+                    None => emit_absent_else(cg)?,
                 }
                 let (_, scope) = cg.current();
                 scope.dispatch(pos2b)?;
@@ -740,12 +826,7 @@ fn gen_if<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Di
                 // A missing clause here implies `val` (see the guard above).
                 match view.else_body {
                     Some(else_body) => codegen(cg, else_body, val)?,
-                    None => {
-                        let (session, scope) = cg.current();
-                        let dst = scope.cursp();
-                        scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
-                        scope.push_n(1)?;
-                    }
+                    None => emit_absent_else(cg)?,
                 }
                 let (_, scope) = cg.current();
                 scope.dispatch(pos2)?;
@@ -801,6 +882,120 @@ fn gen_array<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(),
         scope.push_n(1)?;
     }
     Ok(())
+}
+
+/// Hash literal (`gen_hash` shared by `HashNode` and `KeywordHashNode`).
+fn gen_hash_lit<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(items) = node.hash_elements() else {
+        return Err(unsupported(&node, "hash literal"));
+    };
+    let count = gen_hash(cg, items, val, LIT_ARY_MAX)?;
+    if val && count >= 0 {
+        flush_hash_pairs(cg, count, false)?;
+    }
+    Ok(())
+}
+
+/// Hash construction (`gen_hash`): codes the pairs, then reports the pending
+/// count, or `-1` when a table op already ran (splat or `limit` overflow).
+fn gen_hash<N: BackendNode>(
+    cg: &mut Codegen,
+    items: Vec<N>,
+    val: bool,
+    limit: usize,
+) -> Result<i32, Diagnostic> {
+    let slimit: u32 = val_stack_limit(cg.current().1.cursp());
+    let mut len: i32 = 0;
+    let mut update = false;
+    let mut first = true;
+    for item in items {
+        if item.kind_name() == "AssocSplatNode" {
+            let Some(inner) = item.assoc_splat_value() else {
+                return Err(unsupported(&item, "associative splat"));
+            };
+            if val && first {
+                let (session, scope) = cg.current();
+                let dst = scope.cursp();
+                scope.genop_2(session, opcode::OP_HASH, dst, 0)?;
+                scope.push_n(1)?;
+                update = true;
+            } else if val && len > 0 {
+                flush_hash_pairs(cg, len, update)?;
+            }
+            match inner {
+                Some(value) => codegen(cg, value, val)?,
+                // A bare `**` loads the anonymous keyword rest local.
+                None => {
+                    if val {
+                        let (session, scope) = cg.current();
+                        let dst = scope.cursp();
+                        let index = scope.lv_idx(b"**");
+                        scope.gen_move(session, dst, index, true)?;
+                        scope.push_n(1)?;
+                    }
+                }
+            }
+            if val && (len > 0 || update) {
+                let (session, scope) = cg.current();
+                scope.pop_n(1)?;
+                scope.pop_n(1)?;
+                let dst = scope.cursp();
+                scope.genop_1(session, opcode::OP_HASHCAT, dst)?;
+                scope.push_n(1)?;
+            }
+            update = true;
+            len = 0;
+        } else {
+            let Some((key, value)) = item.assoc_pair() else {
+                return Err(unsupported(&item, "hash element"));
+            };
+            codegen(cg, key, val)?;
+            codegen(cg, value, val)?;
+            len += 1;
+        }
+        if val && u32::from(cg.current().1.cursp()) >= slimit {
+            flush_hash_pairs(cg, len, update)?;
+            update = true;
+            len = 0;
+        }
+        first = false;
+    }
+    if val && len > limit as i32 {
+        let (session, scope) = cg.current();
+        scope.pop_n(pair_pop(len, 0)?)?;
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_HASH, dst, count_u16(len)?)?;
+        scope.push_n(1)?;
+        return Ok(-1);
+    }
+    if update {
+        if val && len > 0 {
+            let (session, scope) = cg.current();
+            scope.pop_n(pair_pop(len, 1)?)?;
+            let dst = scope.cursp();
+            scope.genop_2(session, opcode::OP_HASHADD, dst, count_u16(len)?)?;
+            scope.push_n(1)?;
+        }
+        return Ok(-1);
+    }
+    Ok(len)
+}
+
+/// Fold pending pairs into the table under construction (`OP_HASH` for the
+/// first group, `OP_HASHADD` once a table exists). The destination is read
+/// after the pops in each arm: the `HASHADD` arm pops one more slot.
+fn flush_hash_pairs(cg: &mut Codegen, len: i32, update: bool) -> Result<(), Diagnostic> {
+    let (session, scope) = cg.current();
+    scope.pop_n(pair_pop(len, 0)?)?;
+    if !update {
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_HASH, dst, count_u16(len)?)?;
+    } else {
+        scope.pop_n(1)?;
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_HASHADD, dst, count_u16(len)?)?;
+    }
+    scope.push_n(1)
 }
 
 fn gen_while<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
@@ -876,6 +1071,106 @@ fn gen_while<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(),
     {
         let (session, scope) = cg.current();
         scope.loop_pop(session, val)?;
+    }
+    Ok(())
+}
+
+/// `case`/`when`/`else` (`PM_CASE_NODE`): `===` dispatch over the subject,
+/// `__case_eqq` for splat conditions, valued-tail `LOADNIL` merge.
+fn gen_case<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(view) = node.case_view() else {
+        return Err(unsupported(&node, "case"));
+    };
+    let mut pos3 = JMPLINK_START;
+    let mut head: Option<u16> = None;
+    if let Some(predicate) = view.predicate {
+        let subject = cg.current().1.cursp();
+        codegen(cg, predicate, true)?;
+        head = Some(subject);
+    }
+    for when in view.whens {
+        let Some(when_view) = when.when_view() else {
+            return Err(unsupported(&when, "when"));
+        };
+        let mut pos2 = JMPLINK_START;
+        for cond in when_view.conditions {
+            let splat = cond.kind_name() == "SplatNode";
+            if splat {
+                let Some(inner) = cond.splat_value() else {
+                    return Err(unsupported(&cond, "splat condition"));
+                };
+                match inner {
+                    Some(value) => codegen(cg, value, true)?,
+                    // A bare `*` codes a null subject comparison operand.
+                    None => emit_absent_else(cg)?,
+                }
+            } else {
+                codegen(cg, cond, true)?;
+            }
+            if let Some(subject) = head {
+                let (session, scope) = cg.current();
+                let dst = scope.cursp();
+                scope.gen_move(session, dst, subject, false)?;
+                scope.push_n(2)?;
+                scope.pop_n(3)?;
+                let name: &[u8] = if splat { b"__case_eqq" } else { b"===" };
+                let sym = scope.new_sym(session, name)?;
+                let dst = scope.cursp();
+                scope.genop_3(session, opcode::OP_SEND, dst, sym, 1)?;
+            } else {
+                cg.current().1.pop_n(1)?;
+            }
+            let chained = {
+                let (session, scope) = cg.current();
+                let cur = scope.cursp();
+                scope.genjmp2(session, opcode::OP_JMPIF, cur, pos2, head.is_none())?
+            };
+            pos2 = chained;
+        }
+        let pos1 = cg.current().1.genjmp(opcode::OP_JMP, JMPLINK_START)?;
+        cg.current().1.dispatch_linked(pos2)?;
+        // A null body codes nothing valued-only; an empty node still emits
+        // `LOADNIL` like the `STATEMENTS` arm.
+        gen_branch(cg, when_view.body, val)?;
+        if val {
+            cg.current().1.pop_n(1)?;
+        }
+        let chained = cg.current().1.genjmp(opcode::OP_JMP, pos3)?;
+        pos3 = chained;
+        cg.current().1.dispatch(pos1)?;
+    }
+    if let Some(else_body) = view.else_body {
+        codegen(cg, else_body, val)?;
+        if val {
+            cg.current().1.pop_n(1)?;
+        }
+        pos3 = cg.current().1.genjmp(opcode::OP_JMP, pos3)?;
+    }
+    if val {
+        let pos = cg.current().1.cursp();
+        {
+            let (session, scope) = cg.current();
+            scope.genop_1(session, opcode::OP_LOADNIL, pos)?;
+        }
+        if pos3 != JMPLINK_START {
+            cg.current().1.dispatch_linked(pos3)?;
+        }
+        if head.is_some() {
+            cg.current().1.pop_n(1)?;
+        }
+        if cg.current().1.cursp() != pos {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.gen_move(session, dst, pos, false)?;
+        }
+        cg.current().1.push_n(1)?;
+    } else {
+        if pos3 != JMPLINK_START {
+            cg.current().1.dispatch_linked(pos3)?;
+        }
+        if head.is_some() {
+            cg.current().1.pop_n(1)?;
+        }
     }
     Ok(())
 }
