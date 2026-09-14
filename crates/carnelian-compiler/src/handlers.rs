@@ -98,14 +98,13 @@ fn const_false<N: BackendNode>(node: &N) -> bool {
 }
 
 /// Statement list shared by `StatementsNode` and empty `ElseNode` bodies.
+/// An empty list still emits `LOADNIL` like the C arm does.
 fn gen_list<N: BackendNode>(cg: &mut Codegen, items: Vec<N>, val: bool) -> Result<(), Diagnostic> {
     if items.is_empty() {
-        if val {
-            let (session, scope) = cg.current();
-            let dst = scope.cursp();
-            scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
-            scope.push_n(1)?;
-        }
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+        scope.push_n(1)?;
         return Ok(());
     }
     let last = items.len() - 1;
@@ -113,6 +112,27 @@ fn gen_list<N: BackendNode>(cg: &mut Codegen, items: Vec<N>, val: bool) -> Resul
         codegen(cg, item, index == last && val)?;
     }
     Ok(())
+}
+
+/// Null-tree guard shared by optional branches: `None` (a null subtree)
+/// emits `LOADNIL` only when valued; `Some` follows the statements arm.
+fn gen_branch<N: BackendNode>(
+    cg: &mut Codegen,
+    items: Option<Vec<N>>,
+    val: bool,
+) -> Result<(), Diagnostic> {
+    match items {
+        None => {
+            if val {
+                let (session, scope) = cg.current();
+                let dst = scope.cursp();
+                scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+                scope.push_n(1)?;
+            }
+            Ok(())
+        }
+        Some(list) => gen_list(cg, list, val),
+    }
 }
 
 /// Main dispatch (`codegen()` switch).
@@ -126,10 +146,8 @@ pub fn codegen<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(
             gen_list(cg, items, val)
         }
         "ElseNode" => {
-            let Some(items) = node.else_body() else {
-                return Err(unsupported(&node, "else"));
-            };
-            gen_list(cg, items, val)
+            // In this arm the node is an `else`, so `None` is a null subtree.
+            gen_branch(cg, node.else_body(), val)
         }
         "IntegerNode" => gen_integer(cg, node, val),
         "FloatNode" => gen_float(cg, node, val),
@@ -176,15 +194,28 @@ fn gen_integer<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(
     let Some(lit) = node.integer_lit() else {
         return Err(unsupported(&node, "integer literal"));
     };
-    let (session, scope) = cg.current();
-    let dst = scope.cursp();
     match lit {
-        carnelian_ast::view::IntegerLit::I64(value) => scope.gen_int(session, dst, value)?,
+        carnelian_ast::view::IntegerLit::I64(value) => {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.gen_int(session, dst, value)?;
+            scope.push_n(1)
+        }
         carnelian_ast::view::IntegerLit::Bigint { digits, negative } => {
-            let index = scope.new_litbint(session, &digits, 10, negative)? as u16;
-            scope.genop_2(session, opcode::OP_LOADL, dst, index)?;
+            let index = {
+                let (session, scope) = cg.current();
+                scope.new_litbint(session, &digits, 10, negative)? as u16
+            };
+            emit_load2(cg, opcode::OP_LOADL, index)
         }
     }
+}
+
+/// Two-operand pool load at the cursor (`OP_STRING` and friends).
+fn emit_load2(cg: &mut Codegen, op: u8, index: u16) -> Result<(), Diagnostic> {
+    let (session, scope) = cg.current();
+    let dst = scope.cursp();
+    scope.genop_2(session, op, dst, index)?;
     scope.push_n(1)
 }
 
@@ -196,10 +227,8 @@ fn gen_float<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(),
         return Err(unsupported(&node, "float literal"));
     };
     let (session, scope) = cg.current();
-    let dst = scope.cursp();
     let index = scope.new_lit_float(session, value)? as u16;
-    scope.genop_2(session, opcode::OP_LOADL, dst, index)?;
-    scope.push_n(1)
+    emit_load2(cg, opcode::OP_LOADL, index)
 }
 
 fn gen_string<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
@@ -210,10 +239,8 @@ fn gen_string<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<()
         return Err(unsupported(&node, "string literal"));
     };
     let (session, scope) = cg.current();
-    let dst = scope.cursp();
     let index = scope.new_lit_str(session, &bytes)? as u16;
-    scope.genop_2(session, opcode::OP_STRING, dst, index)?;
-    scope.push_n(1)
+    emit_load2(cg, opcode::OP_STRING, index)
 }
 
 fn gen_symbol<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
@@ -224,10 +251,8 @@ fn gen_symbol<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<()
         return Err(unsupported(&node, "symbol literal"));
     };
     let (session, scope) = cg.current();
-    let dst = scope.cursp();
     let index = scope.new_sym(session, &bytes)?;
-    scope.genop_2(session, opcode::OP_LOADSYM, dst, index)?;
-    scope.push_n(1)
+    emit_load2(cg, opcode::OP_LOADSYM, index)
 }
 
 fn gen_simple<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
@@ -419,13 +444,15 @@ fn gen_binop(cg: &mut Codegen, name: &[u8], dst: u16) -> Result<bool, Diagnostic
         } else {
             let data = scope.last_insn();
             if data.insn == opcode::OP_LOADI_0
-                && u32::from(data.a) == u32::from(dst) + 1
+                && data.a == u32::from(dst) + 1
                 && scope.lastpc != scope.lastlabel
             {
                 let prev = scope.prev_pc(scope.lastpc);
                 match opcode::decode_at(&scope.iseq, prev as usize) {
                     Some((data0, _))
-                        if data0.insn == opcode::OP_MOVE && data0.a == dst && data0.b != dst =>
+                        if data0.insn == opcode::OP_MOVE
+                            && data0.a == u32::from(dst)
+                            && data0.b != dst =>
                     {
                         Step::Idx0(data0.b)
                     }
@@ -525,6 +552,20 @@ fn gen_call<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), 
     emit_call(cg, noself, noop, &name, nargs, val, safe, skip)
 }
 
+/// Direct single-operand operator selection (`*`, `/`, comparisons).
+fn direct_op(name: &[u8]) -> Option<u8> {
+    match name {
+        b"*" => Some(opcode::OP_MUL),
+        b"/" => Some(opcode::OP_DIV),
+        b"<" => Some(opcode::OP_LT),
+        b"<=" => Some(opcode::OP_LE),
+        b">" => Some(opcode::OP_GT),
+        b">=" => Some(opcode::OP_GE),
+        b"==" => Some(opcode::OP_EQ),
+        _ => None,
+    }
+}
+
 /// Tail of `gen_call`: operator specials and `SEND` selection.
 #[allow(clippy::too_many_arguments)]
 fn emit_call(
@@ -542,51 +583,19 @@ fn emit_call(
         gen_addsub(cg, opcode::OP_ADD, dst)?;
     } else if !noop && name == b"-" && nargs == 1 {
         gen_addsub(cg, opcode::OP_SUB, dst)?;
-    } else if !noop && name == b"*" && nargs == 1 {
-        let (session, scope) = cg.current();
-        scope.genop_1(session, opcode::OP_MUL, dst)?;
-    } else if !noop && name == b"/" && nargs == 1 {
-        let (session, scope) = cg.current();
-        scope.genop_1(session, opcode::OP_DIV, dst)?;
-    } else if !noop && name == b"<" && nargs == 1 {
-        let (session, scope) = cg.current();
-        scope.genop_1(session, opcode::OP_LT, dst)?;
-    } else if !noop && name == b"<=" && nargs == 1 {
-        let (session, scope) = cg.current();
-        scope.genop_1(session, opcode::OP_LE, dst)?;
-    } else if !noop && name == b">" && nargs == 1 {
-        let (session, scope) = cg.current();
-        scope.genop_1(session, opcode::OP_GT, dst)?;
-    } else if !noop && name == b">=" && nargs == 1 {
-        let (session, scope) = cg.current();
-        scope.genop_1(session, opcode::OP_GE, dst)?;
-    } else if !noop && name == b"==" && nargs == 1 {
-        let (session, scope) = cg.current();
-        scope.genop_1(session, opcode::OP_EQ, dst)?;
+    } else if !noop && nargs == 1 {
+        if let Some(op) = direct_op(name) {
+            let (session, scope) = cg.current();
+            scope.genop_1(session, op, dst)?;
+        } else if gen_binop(cg, name, dst)? {
+            // An index opcode was emitted.
+        } else {
+            send_call(cg, noself, name, nargs, dst)?;
+        }
     } else if !noop && nargs == 0 && gen_uniop(cg, name, dst)? {
         // A literal absorbed its sign.
-    } else if !noop && nargs == 1 && gen_binop(cg, name, dst)? {
-        // An index opcode was emitted.
     } else {
-        let sym = {
-            let (session, scope) = cg.current();
-            scope.new_sym(session, name)?
-        };
-        if noself {
-            let (session, scope) = cg.current();
-            if nargs == 0 {
-                scope.genop_2(session, opcode::OP_SSEND0, dst, sym)?;
-            } else {
-                scope.genop_3(session, opcode::OP_SSEND, dst, sym, nargs as u8)?;
-            }
-        } else {
-            let (session, scope) = cg.current();
-            if nargs == 0 {
-                scope.genop_2(session, opcode::OP_SEND0, dst, sym)?;
-            } else {
-                scope.genop_3(session, opcode::OP_SEND, dst, sym, nargs as u8)?;
-            }
-        }
+        send_call(cg, noself, name, nargs, dst)?;
     }
     if safe {
         cg.current().1.dispatch(skip)?;
@@ -597,27 +606,52 @@ fn emit_call(
     Ok(())
 }
 
+/// Generic `SEND`/`SSEND` emission.
+fn send_call(
+    cg: &mut Codegen,
+    noself: bool,
+    name: &[u8],
+    nargs: i32,
+    dst: u16,
+) -> Result<(), Diagnostic> {
+    let sym = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, name)?
+    };
+    if noself {
+        let (session, scope) = cg.current();
+        if nargs == 0 {
+            scope.genop_2(session, opcode::OP_SSEND0, dst, sym)?;
+        } else {
+            scope.genop_3(session, opcode::OP_SSEND, dst, sym, nargs as u8)?;
+        }
+    } else {
+        let (session, scope) = cg.current();
+        if nargs == 0 {
+            scope.genop_2(session, opcode::OP_SEND0, dst, sym)?;
+        } else {
+            scope.genop_3(session, opcode::OP_SEND, dst, sym, nargs as u8)?;
+        }
+    }
+    Ok(())
+}
+
 fn gen_if<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
     let Some(view) = node.if_branch() else {
         return Err(unsupported(&node, "conditional"));
     };
     let Some(predicate) = view.predicate else {
-        let Some(then_body) = view.then_body else {
-            return Err(unsupported(&node, "empty conditional"));
+        // No condition: only the `else` side runs (possibly both null).
+        return match view.else_body {
+            Some(body) => codegen(cg, body, val),
+            None => gen_branch(cg, None::<Vec<N>>, val),
         };
-        return codegen(cg, then_body, val);
     };
     if const_true(&predicate) {
-        let Some(then_body) = view.then_body else {
-            return Err(unsupported(&node, "empty then"));
-        };
-        return codegen(cg, then_body, val);
+        return gen_branch(cg, view.then_body, val);
     }
     if const_false(&predicate) {
-        let Some(else_body) = view.else_body else {
-            return Err(unsupported(&node, "empty else"));
-        };
-        return codegen(cg, else_body, val);
+        return gen_branch(cg, view.else_body.map(|body| vec![body]), val);
     }
     // `nil?` predicate shortcut.
     let mut nil_check = false;
@@ -655,10 +689,8 @@ fn gen_if<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Di
                 pos1 = scope.genjmp(opcode::OP_JMP, JMPLINK_START)?;
                 scope.dispatch(pos2)?;
             }
-            let Some(then_body) = view.then_body else {
-                return Err(unsupported(&node, "empty then"));
-            };
-            codegen(cg, then_body, val)?;
+            let then_body = view.then_body;
+            gen_branch(cg, then_body, val)?;
             if val {
                 let (_, scope) = cg.current();
                 scope.pop_n(1)?;
@@ -670,10 +702,16 @@ fn gen_if<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Di
                     pos2b = scope.genjmp(opcode::OP_JMP, JMPLINK_START)?;
                     scope.dispatch(pos1)?;
                 }
-                let Some(else_body) = view.else_body else {
-                    return Err(unsupported(&node, "empty else"));
-                };
-                codegen(cg, else_body, val)?;
+                // A missing clause here implies `val` (see the guard above).
+                match view.else_body {
+                    Some(else_body) => codegen(cg, else_body, val)?,
+                    None => {
+                        let (session, scope) = cg.current();
+                        let dst = scope.cursp();
+                        scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+                        scope.push_n(1)?;
+                    }
+                }
                 let (_, scope) = cg.current();
                 scope.dispatch(pos2b)?;
             } else {
@@ -687,10 +725,7 @@ fn gen_if<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Di
                 let cur = scope.cursp();
                 pos1 = scope.genjmp2(session, opcode::OP_JMPNOT, cur, JMPLINK_START, val)?;
             }
-            let Some(then_body) = view.then_body else {
-                return Err(unsupported(&node, "empty then"));
-            };
-            codegen(cg, then_body, val)?;
+            gen_branch(cg, view.then_body, val)?;
             if val {
                 let (_, scope) = cg.current();
                 scope.pop_n(1)?;
@@ -702,10 +737,16 @@ fn gen_if<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Di
                     pos2 = scope.genjmp(opcode::OP_JMP, JMPLINK_START)?;
                     scope.dispatch(pos1)?;
                 }
-                let Some(else_body) = view.else_body else {
-                    return Err(unsupported(&node, "empty else"));
-                };
-                codegen(cg, else_body, val)?;
+                // A missing clause here implies `val` (see the guard above).
+                match view.else_body {
+                    Some(else_body) => codegen(cg, else_body, val)?,
+                    None => {
+                        let (session, scope) = cg.current();
+                        let dst = scope.cursp();
+                        scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+                        scope.push_n(1)?;
+                    }
+                }
                 let (_, scope) = cg.current();
                 scope.dispatch(pos2)?;
             } else {
@@ -821,13 +862,12 @@ fn gen_while<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(),
     }
     {
         let (_, scope) = cg.current();
-        scope.new_label();
+        let redo = scope.new_label();
+        scope.loops.last_mut().expect("loop").pc1 = redo;
         scope.genop_0(opcode::OP_NOP)?;
     }
-    let Some(body) = view.body else {
-        return Err(unsupported(&node, "loop without body"));
-    };
-    codegen(cg, body, false)?;
+    // A null body codes nothing; an empty node still emits `LOADNIL`.
+    gen_branch(cg, view.body, false)?;
     {
         let (_, scope) = cg.current();
         scope.genjmp(opcode::OP_JMP, pc0)?;

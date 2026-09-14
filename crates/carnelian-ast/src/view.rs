@@ -68,14 +68,15 @@ pub struct CallView<N> {
     pub attr_write: bool,
 }
 
-/// `if`/`unless` parts (`None` bodies are empty branches).
+/// `if`/`unless` parts. `None` is a null subtree; an empty vector is an
+/// empty statements node (both occur in real parses).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IfView<N> {
-    /// Condition (always present; `None` means the constant-folded path).
+    /// Condition (`None` only for the constant-folded path).
     pub predicate: Option<N>,
-    /// Then branch.
-    pub then_body: Option<N>,
-    /// Else branch.
+    /// Then branch statements.
+    pub then_body: Option<Vec<N>>,
+    /// Else clause node (`ElseNode` or nested `IfNode`).
     pub else_body: Option<N>,
     /// Inverted condition (`unless`).
     pub is_unless: bool,
@@ -86,8 +87,8 @@ pub struct IfView<N> {
 pub struct WhileView<N> {
     /// Condition.
     pub predicate: Option<N>,
-    /// Body (empty loop bodies still carry a statements node).
-    pub body: Option<N>,
+    /// Body statements.
+    pub body: Option<Vec<N>>,
     /// `until` instead of `while`.
     pub is_until: bool,
     /// `begin...end while` modifier form.

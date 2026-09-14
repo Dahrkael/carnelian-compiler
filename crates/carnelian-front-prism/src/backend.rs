@@ -16,6 +16,14 @@ fn wrap_many(list: ruby_prism::NodeList<'_>) -> Vec<PrismNode<'_>> {
     list.iter().map(wrap).collect()
 }
 
+/// Statements of an `else` clause known to exist; a missing list is empty.
+fn else_statements<'pr>(clause: &ruby_prism::ElseNode<'pr>) -> Vec<PrismNode<'pr>> {
+    clause
+        .statements()
+        .map(|statements| wrap_many(statements.body()))
+        .unwrap_or_default()
+}
+
 fn const_bytes(id: ruby_prism::ConstantId<'_>) -> Vec<u8> {
     id.as_slice().to_vec()
 }
@@ -31,13 +39,13 @@ impl BackendNode for PrismNode<'_> {
                 magnitude |= u128::from(*limb) << (32 * index);
             }
             let fits = if negative {
-                magnitude <= 1 << 63
+                magnitude <= 1u128 << 63
             } else {
                 magnitude <= i64::MAX as u128
             };
             if fits {
                 let scalar = if negative {
-                    if magnitude == 1 << 63 {
+                    if magnitude == 1u128 << 63 {
                         i64::MIN
                     } else {
                         -(magnitude as i64)
@@ -117,7 +125,7 @@ impl BackendNode for PrismNode<'_> {
                 predicate: Some(wrap(node.predicate())),
                 then_body: node
                     .statements()
-                    .map(|statements| wrap(statements.as_node())),
+                    .map(|statements| wrap_many(statements.body())),
                 else_body: node.subsequent().map(wrap),
                 is_unless: false,
             });
@@ -125,7 +133,7 @@ impl BackendNode for PrismNode<'_> {
         let node = self.inner.as_unless_node()?;
         Some(IfView {
             predicate: Some(wrap(node.predicate())),
-            then_body: node.else_clause().map(|clause| wrap(clause.as_node())),
+            then_body: node.else_clause().map(|clause| else_statements(&clause)),
             else_body: node
                 .statements()
                 .map(|statements| wrap(statements.as_node())),
@@ -152,7 +160,7 @@ impl BackendNode for PrismNode<'_> {
                 predicate: Some(wrap(node.predicate())),
                 body: node
                     .statements()
-                    .map(|statements| wrap(statements.as_node())),
+                    .map(|statements| wrap_many(statements.body())),
                 is_until: false,
                 begin_modifier: u32::from(node.flags())
                     & ruby_prism_sys::pm_loop_flags::PM_LOOP_FLAGS_BEGIN_MODIFIER as u32
@@ -164,7 +172,7 @@ impl BackendNode for PrismNode<'_> {
             predicate: Some(wrap(node.predicate())),
             body: node
                 .statements()
-                .map(|statements| wrap(statements.as_node())),
+                .map(|statements| wrap_many(statements.body())),
             is_until: true,
             begin_modifier: u32::from(node.flags())
                 & ruby_prism_sys::pm_loop_flags::PM_LOOP_FLAGS_BEGIN_MODIFIER as u32
@@ -188,10 +196,8 @@ impl BackendNode for PrismNode<'_> {
 
     fn else_body(&self) -> Option<Vec<Self>> {
         let node = self.inner.as_else_node()?;
-        Some(match node.statements() {
-            Some(statements) => vec![wrap(statements.as_node())],
-            None => Vec::new(),
-        })
+        node.statements()
+            .map(|statements| wrap_many(statements.body()))
     }
 
     fn program(&self) -> Option<ProgramView<Self>> {
