@@ -1,8 +1,8 @@
 //! `BackendNode` for borrowed nodes (thin access, no tree copies).
 
 use carnelian_ast::view::{
-    BackendNode, CallView, CaseView, IfView, IntegerLit, LvarRef, LvarWrite, ProgramView,
-    SimpleLit, WhenView, WhileView,
+    BackendNode, BeginView, CallView, CaseView, IfView, IntegerLit, LvarRef, LvarWrite,
+    ProgramView, SimpleLit, WhenView, WhileView,
 };
 use carnelian_ast::AstNode;
 
@@ -301,5 +301,78 @@ impl BackendNode for PrismNode<'_> {
     fn embedded_var(&self) -> Option<Self> {
         let node = self.inner.as_embedded_variable_node()?;
         Some(wrap(node.variable()))
+    }
+
+    fn alias_pair(&self) -> Option<(Self, Self)> {
+        let node = self.inner.as_alias_method_node()?;
+        Some((wrap(node.new_name()), wrap(node.old_name())))
+    }
+
+    fn undef_list(&self) -> Option<Vec<Self>> {
+        let node = self.inner.as_undef_node()?;
+        Some(wrap_many(node.names()))
+    }
+
+    fn defined_value(&self) -> Option<Self> {
+        let node = self.inner.as_defined_node()?;
+        Some(wrap(node.value()))
+    }
+
+    fn implicit_value(&self) -> Option<Self> {
+        let node = self.inner.as_implicit_node()?;
+        Some(wrap(node.value()))
+    }
+
+    fn parentheses_body(&self) -> Option<Option<Self>> {
+        let node = self.inner.as_parentheses_node()?;
+        Some(node.body().map(wrap))
+    }
+
+    fn begin_view(&self) -> Option<BeginView<Self>> {
+        let node = self.inner.as_begin_node()?;
+        Some(BeginView {
+            statements: node.statements().map(|stmts| wrap(stmts.as_node())),
+            bare: node.rescue_clause().is_none()
+                && node.else_clause().is_none()
+                && node.ensure_clause().is_none(),
+        })
+    }
+
+    fn instance_var_read_name(&self) -> Option<Vec<u8>> {
+        let node = self.inner.as_instance_variable_read_node()?;
+        Some(const_bytes(node.name()))
+    }
+
+    fn global_var_read_name(&self) -> Option<Vec<u8>> {
+        let node = self.inner.as_global_variable_read_node()?;
+        Some(const_bytes(node.name()))
+    }
+
+    fn class_var_read_name(&self) -> Option<Vec<u8>> {
+        let node = self.inner.as_class_variable_read_node()?;
+        Some(const_bytes(node.name()))
+    }
+
+    fn constant_read_name(&self) -> Option<Vec<u8>> {
+        let node = self.inner.as_constant_read_node()?;
+        Some(const_bytes(node.name()))
+    }
+
+    fn constant_path_parts(&self) -> Option<(Option<Self>, Vec<u8>)> {
+        let node = self.inner.as_constant_path_node()?;
+        Some((
+            node.parent().map(wrap),
+            node.name().map(const_bytes).unwrap_or_default(),
+        ))
+    }
+
+    fn raw_call_args(&self) -> Option<Vec<Self>> {
+        let node = self.inner.as_arguments_node()?;
+        Some(node.arguments().iter().map(wrap).collect())
+    }
+
+    fn raw_array_elements(&self) -> Option<Vec<Self>> {
+        let node = self.inner.as_array_node()?;
+        Some(node.elements().iter().map(wrap).collect())
     }
 }

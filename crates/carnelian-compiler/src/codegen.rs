@@ -101,6 +101,8 @@ pub struct Scope {
     pub nregs: u16,
     /// `for` scopes above (upvar depth adjustment).
     pub for_depth: u16,
+    /// Recursion level against `MRC_CODEGEN_LEVEL_MAX` (`s->rlev`).
+    pub rlev: u32,
     /// True for the dummy top scope created by `generate_code`.
     pub is_top: bool,
 }
@@ -163,6 +165,7 @@ impl Scope {
             nlocals: 0,
             nregs: 0,
             for_depth: 0,
+            rlev: 0,
             is_top: true,
         }
     }
@@ -197,6 +200,7 @@ impl Scope {
             nlocals: 0,
             nregs: 0,
             for_depth: 0,
+            rlev: 0,
             is_top: false,
         };
         scope.sp = locals.len() as u16 + 1; // add self
