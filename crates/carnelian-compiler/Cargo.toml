@@ -1,0 +1,15 @@
+[package]
+name = "carnelian-compiler"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pure-Rust RITE backend (irep model + writer). No C, no FFI."
+keywords = ["ruby", "mruby", "rite", "compiler"]
+
+[features]
+default = ["front-owned"]
+front-owned = []
+
+[dependencies]
+carnelian-ast = { workspace = true }
