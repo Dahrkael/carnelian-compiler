@@ -5,6 +5,8 @@
 
 use std::collections::BTreeMap;
 
+pub mod view;
+
 include!(concat!(env!("OUT_DIR"), "/node_generated.rs"));
 
 /// Interned constant/symbol (`constant` fields in Prism).
