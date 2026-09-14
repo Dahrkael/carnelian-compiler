@@ -92,3 +92,38 @@ is recorded here with cause. User decisions are not deviations.
 - Skipped e2e with reason: bare `when *` (rejected by the reference parser),
   `#@v` (needs P2.4 ivars), empty-node `when` bodies (Prism only yields null;
   covered at adapter level).
+
+## P2 remaining tranches (worktree feature/p2-rest)
+
+Four parallel worktree branches were implemented from the dev snapshot and
+integrated into `feature/p2-rest`:
+
+- P2.3 blocks/lambdas/yield; P2.4 def/class/module/sclass, constants,
+  ivar/cvar/gvar, `super`; P2.5 rescue/ensure, splat, kwargs, masgn;
+  P2.6 alias/undef and `defined?`.
+
+Deviations and decisions during integration:
+
+- Merges were resolved by union of additions plus dedup of infrastructure the
+  tranches added independently (`args_req`, `ainfo`/`aspec`/`mscope`, the
+  child-scope constructors). A plain merge interleaves same-shaped trailing
+  methods, so trait/impl conflicts were rebuilt by taking the accumulated side
+  and re-appending the incoming branch's methods.
+- Cross-tranche gates that went stale were lifted and certified, same category
+  as the P2 review: `f { 1 }` (call blocks), `rescue TypeError`/`Foo::Bar`
+  (constants tranche), and `defined?` over constant/ivar/gvar/cvar receivers
+  and chains.
+- Integration review found a real merge defect: the p23 `gen_yield` still
+  assumed `call_args()` gated keyword/splat, so `yield k: 1`, `yield *a`,
+  `yield **h` and 15-argument yields diverged after p25 lifted that gate.
+  Ported the C `PM_YIELD_NODE` keyword/`CALL_MAXARGS` transport (BLKCALL vs
+  `:call` dispatch) and added regression snippets.
+- Still gated after P2: `case/in` pattern matching (`codegen_pattern`),
+  back-reference/numbered-reference `defined?`, `BEGIN`/`END` and flip-flop
+  (the latter three are rejected by the pinned reference parser, so no golden
+  can exist), non-decimal `>u128` integer literals, and the exotic parameter
+  and target forms noted per tranche.
+- Remaining known duplication (not a correctness issue): `gen_class`/
+  `gen_module`/`gen_sclass` share a body-scope tail that C factors as
+  `scope_body`; `gen_yield`/`gen_call_impl` repeat the `CALL_MAXARGS`
+  protocol.
