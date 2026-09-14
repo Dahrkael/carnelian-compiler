@@ -37,6 +37,18 @@ fn genop_operand_widths() {
 }
 
 #[test]
+fn genop_1_widens_registers() {
+    let (session, mut scope) = new_scope();
+    scope
+        .genop_1(&session, opcode::OP_LOADNIL, 0x100)
+        .expect("genop");
+    assert_eq!(
+        &scope.iseq[..scope.pc as usize],
+        &[opcode::OP_EXT1, opcode::OP_LOADNIL, 0x01, 0x00]
+    );
+}
+
+#[test]
 fn gen_int_boundaries() {
     let cases: &[(i64, &[u8])] = &[
         (-0x8000_0001, &[opcode::OP_LOADL, 0, 0]), // pool index patched below
@@ -55,6 +67,13 @@ fn gen_int_boundaries() {
             &[opcode::OP_LOADI32, 0, 0x7f, 0xff, 0xff, 0xff],
         ),
         (0x8000_0000, &[opcode::OP_LOADL, 0, 0]),
+        (-0x100, &[opcode::OP_LOADI16, 0, 0xff, 0x00]),
+        (
+            -0x8000_0000,
+            &[opcode::OP_LOADI32, 0, 0x80, 0x00, 0x00, 0x00],
+        ),
+        (i64::MIN, &[opcode::OP_LOADL, 0, 0]),
+        (i64::MAX, &[opcode::OP_LOADL, 0, 0]),
     ];
     for (value, prefix) in cases {
         let (mut session, mut scope) = new_scope();
@@ -110,6 +129,36 @@ fn jump_patch_roundtrip() {
     assert_eq!(
         &scope.iseq[..scope.pc as usize],
         &[opcode::OP_JMPNOT, 1, 0, 2, opcode::OP_LOADNIL, 1]
+    );
+}
+
+#[test]
+fn chained_jumps_patch_in_order() {
+    let (session, mut scope) = new_scope();
+    let first = scope.genjmp(opcode::OP_JMP, u32::MAX).expect("jmp");
+    scope
+        .genop_1(&session, opcode::OP_LOADNIL, 0)
+        .expect("load");
+    let second = scope.genjmp(opcode::OP_JMP, first).expect("jmp");
+    scope
+        .genop_1(&session, opcode::OP_LOADNIL, 1)
+        .expect("load");
+    scope.dispatch_linked(second).expect("patch");
+    // Both jumps land past the second LOADNIL (offset 2 and 7).
+    assert_eq!(
+        &scope.iseq[..scope.pc as usize],
+        &[
+            opcode::OP_JMP,
+            0,
+            7,
+            opcode::OP_LOADNIL,
+            0,
+            opcode::OP_JMP,
+            0,
+            2,
+            opcode::OP_LOADNIL,
+            1
+        ]
     );
 }
 
@@ -195,6 +244,24 @@ fn finish_computes_counts_and_lvar() {
     assert_eq!(irep.nlocals, 2);
     assert_eq!(irep.nregs, 2);
     assert_eq!(irep.lv, vec![Some(0)]);
+}
+
+#[test]
+fn move_fuses_addi_into_addilv() {
+    let (mut session, mut scope) = new_scope();
+    scope.nlocals = 1;
+    scope
+        .genop_2(&session, opcode::OP_MOVE, 1, 2)
+        .expect("move");
+    scope
+        .genop_2(&session, opcode::OP_ADDI, 1, 5)
+        .expect("addi");
+    // MOVE R2,R1 is the temp shuffle: fuse into ADDILV R2,R1,5.
+    scope.gen_move(&mut session, 2, 1, false).expect("move");
+    assert_eq!(
+        &scope.iseq[..scope.pc as usize],
+        &[opcode::OP_ADDILV, 2, 1, 5]
+    );
 }
 
 #[test]

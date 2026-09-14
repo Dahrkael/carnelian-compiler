@@ -13,8 +13,10 @@ const SNIPPETS: &[(&str, &str)] = &[
     ("int16", "puts 70000\n"),
     ("int64", "x = 3000000000\nputs x\n"),
     ("bigint", "puts 99999999999999999999999\n"),
+    ("neg_bigint", "puts -99999999999999999999999\n"),
     ("float", "puts 1.5\n"),
     ("neg_float", "puts -2.5\n"),
+    ("neg_zero_float", "puts -0.0\n"),
     ("string", "puts \"hello\"\n"),
     ("string_escape", "puts \"a\\nb\"\n"),
     ("string_empty", "puts \"\"\n"),
@@ -37,11 +39,18 @@ const SNIPPETS: &[(&str, &str)] = &[
         "while_loop",
         "i = 0\nwhile i < 3 do i = i + 1 end\nputs i\n",
     ),
+    ("while_empty", "i = 0\nwhile i < 0 do end\nputs i\n"),
     (
         "until_loop",
         "i = 0\nuntil i > 2 do i = i + 1 end\nputs i\n",
     ),
     ("nil_check", "x = nil\nputs x.nil?\n"),
+    ("if_empty_then", "x = nil\nif x then end\nputs 1\n"),
+    ("if_empty_then_val", "x = nil\nif x then end\n"),
+    (
+        "if_empty_else",
+        "y = nil\nif y then puts 1 else end\nputs 2\n",
+    ),
 ];
 
 fn carnelian() -> Command {
