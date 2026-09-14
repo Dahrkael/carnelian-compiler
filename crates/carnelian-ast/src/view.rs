@@ -95,6 +95,27 @@ pub struct WhileView<N> {
     pub begin_modifier: bool,
 }
 
+/// `case` parts. `whens` holds the `WhenNode` children in order;
+/// `else_body` is the `ElseNode` wrapper (`None` when absent).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseView<N> {
+    /// Subject (`None` for a bare `case`).
+    pub predicate: Option<N>,
+    /// `when` clauses in order.
+    pub whens: Vec<N>,
+    /// `else` clause node.
+    pub else_body: Option<N>,
+}
+
+/// `when` parts. `body` is `None` for a null statements subtree and
+/// `Some` (possibly empty) for a statements node, mirroring `IfView`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhenView<N> {
+    /// Match conditions in order (`SplatNode` allowed).
+    pub conditions: Vec<N>,
+    /// Body statements.
+    pub body: Option<Vec<N>>,
+}
 /// Program parts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgramView<N> {
@@ -184,6 +205,53 @@ pub trait BackendNode: AstNode + Sized {
 
     /// `true`/`false`/`nil`/`self` marker.
     fn simple_lit(&self) -> Option<SimpleLit> {
+        None
+    }
+
+    /// Hash literal elements (`AssocNode`/`AssocSplatNode` children).
+    /// Shared by `HashNode` and `KeywordHashNode` like `gen_hash`.
+    fn hash_elements(&self) -> Option<Vec<Self>> {
+        None
+    }
+
+    /// Association key and value (`AssocNode`).
+    fn assoc_pair(&self) -> Option<(Self, Self)> {
+        None
+    }
+
+    /// Splatted hash value (`AssocSplatNode`); inner `None` is a bare `**`.
+    fn assoc_splat_value(&self) -> Option<Option<Self>> {
+        None
+    }
+
+    /// Splatted value (`SplatNode`); inner `None` is a bare `*`.
+    fn splat_value(&self) -> Option<Option<Self>> {
+        None
+    }
+
+    /// `case` parts.
+    fn case_view(&self) -> Option<CaseView<Self>> {
+        None
+    }
+
+    /// `when` parts.
+    fn when_view(&self) -> Option<WhenView<Self>> {
+        None
+    }
+
+    /// Interpolated string parts (`InterpolatedStringNode`).
+    fn string_parts(&self) -> Option<Vec<Self>> {
+        None
+    }
+
+    /// Embedded statements body (`EmbeddedStatementsNode`); `None` is a
+    /// null statements subtree, `Some` (possibly empty) is the node.
+    fn embedded_body(&self) -> Option<Vec<Self>> {
+        None
+    }
+
+    /// Embedded variable read (`EmbeddedVariableNode`).
+    fn embedded_var(&self) -> Option<Self> {
         None
     }
 }

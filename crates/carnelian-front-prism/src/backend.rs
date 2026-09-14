@@ -1,8 +1,8 @@
 //! `BackendNode` for borrowed nodes (thin access, no tree copies).
 
 use carnelian_ast::view::{
-    BackendNode, CallView, IfView, IntegerLit, LvarRef, LvarWrite, ProgramView, SimpleLit,
-    WhileView,
+    BackendNode, CallView, CaseView, IfView, IntegerLit, LvarRef, LvarWrite, ProgramView,
+    SimpleLit, WhenView, WhileView,
 };
 use carnelian_ast::AstNode;
 
@@ -241,5 +241,65 @@ impl BackendNode for PrismNode<'_> {
         } else {
             None
         }
+    }
+
+    fn hash_elements(&self) -> Option<Vec<Self>> {
+        if let Some(node) = self.inner.as_hash_node() {
+            return Some(wrap_many(node.elements()));
+        }
+        let node = self.inner.as_keyword_hash_node()?;
+        Some(wrap_many(node.elements()))
+    }
+
+    fn assoc_pair(&self) -> Option<(Self, Self)> {
+        let node = self.inner.as_assoc_node()?;
+        Some((wrap(node.key()), wrap(node.value())))
+    }
+
+    fn assoc_splat_value(&self) -> Option<Option<Self>> {
+        let node = self.inner.as_assoc_splat_node()?;
+        Some(node.value().map(wrap))
+    }
+
+    fn splat_value(&self) -> Option<Option<Self>> {
+        let node = self.inner.as_splat_node()?;
+        Some(node.expression().map(wrap))
+    }
+
+    fn case_view(&self) -> Option<CaseView<Self>> {
+        let node = self.inner.as_case_node()?;
+        Some(CaseView {
+            predicate: node.predicate().map(wrap),
+            whens: wrap_many(node.conditions()),
+            else_body: node.else_clause().map(|clause| wrap(clause.as_node())),
+        })
+    }
+
+    fn when_view(&self) -> Option<WhenView<Self>> {
+        let node = self.inner.as_when_node()?;
+        Some(WhenView {
+            conditions: wrap_many(node.conditions()),
+            body: node
+                .statements()
+                .map(|statements| wrap_many(statements.body())),
+        })
+    }
+
+    fn string_parts(&self) -> Option<Vec<Self>> {
+        let node = self.inner.as_interpolated_string_node()?;
+        Some(wrap_many(node.parts()))
+    }
+
+    fn embedded_body(&self) -> Option<Vec<Self>> {
+        let node = self.inner.as_embedded_statements_node()?;
+        // A null subtree is `None` (valued-only `LOADNIL` via `gen_branch`),
+        // distinct from an empty node (`Some` empty vec). See `gen_branch`.
+        let statements = node.statements()?;
+        Some(wrap_many(statements.body()))
+    }
+
+    fn embedded_var(&self) -> Option<Self> {
+        let node = self.inner.as_embedded_variable_node()?;
+        Some(wrap(node.variable()))
     }
 }
