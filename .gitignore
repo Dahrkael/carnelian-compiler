@@ -1,0 +1,21 @@
+# Rust build artifacts
+/target
+**/target
+
+# Rust compiler backups
+**/*.rs.bk
+*.pdb
+
+# Distribution and web build outputs
+/bin/
+/dist/
+
+# Editors and IDEs
+.vscode/
+.idea/
+*.iml
+*.swp
+
+# OS cruft
+.DS_Store
+Thumbs.db
