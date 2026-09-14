@@ -238,14 +238,14 @@ Frozen files untouched: `view.rs`, `handlers.rs`, `front-owned`
   suites pass unchanged (`corpus.rs` carries `#![allow(dead_code)]` since
   each target uses only its own tables).
 - CLI: `compile --frontend owned` = parse (FFI) → `lower` →
-  `compile_prism::<Owned>` (no `compile_owned` alias exists yet); unknown
-  frontends stay exit 2. `verify` gained `--frontend {prism|owned}`,
-  default `prism`. `roundtrip::cli_exit_codes` now expects owned exit 0
-  with prism-identical bytes (plus an unknown-frontend exit 2 check).
+  `compile_tree::<Owned>`; unknown frontends stay exit 2. `verify`
+  gained `--frontend {prism|owned}`, default `prism`.
+  `roundtrip::cli_exit_codes` now expects owned exit 0 with
+  prism-identical bytes (plus an unknown-frontend exit 2 check).
 - New `tests/p3_parity.rs`: 345 snippets (338 table + 7 synthetic) × 2
   modes 3-way `reference`/`prism`/`owned` compare; 22 gated agreements
   (exit 1 + same marker under both frontends); two host fixtures
-  (hand-built `Node` → `compile_prism::<Owned>` asserting the exact
+  (hand-built `Node` → `compile_tree::<Owned>` asserting the exact
   reference bytes for `` and `puts 1`).
 - Wasm: `cargo check -p carnelian-ast -p carnelian-compiler --target
   wasm32-unknown-unknown` passes. Fixtures live in CLI tests (host-only);
@@ -292,6 +292,19 @@ Frozen files untouched: `view.rs`, `handlers.rs`, `front-owned`
   `recv_ready` through gathered calls (fail-closed family, deferred).
 - Exit state: full workspace suite green (incl. 345×2×3 parity and 22
   gated agreements), clippy `-D warnings` clean, fmt clean,
-  `wasm32-unknown-unknown` check of the pure path passes. Follow-ups for
-  later: feature-split `front-owned` (`lower` dev-only so the crate
-  builds for wasm), `recv_ready` gathered-call threading.
+  `wasm32-unknown-unknown` check of the pure path passes. Follow-up for
+  later: `recv_ready` gathered-call threading.
+
+## Reorg: front-owned dissolved (same worktree)
+
+- `Owned` + `impl BackendNode` moved to `carnelian-ast` (`src/owned.rs`,
+  pure/shipping); `lower` moved to `carnelian-front-prism` (`src/lower.rs`,
+  dev/CLI); `front-owned` crate deleted. CLI and fixtures use
+  `carnelian_ast::Owned` / `carnelian_front_prism::lower`.
+- `compile_prism` renamed to `compile_tree` (generic entry; the
+  `compile(source)` stub stays reserved for P4). Call sites, docs and
+  notes updated.
+- Reviewer round on the reorg (applied): import grouping, `Span` import,
+  `front-prism` crate docs, `plan.md` workspace map (also fixed its
+  `front-mri` phase typo: Fase 4, not 3). Declined: wiring the inert
+  `front-*` feature flags (P4 owns that).

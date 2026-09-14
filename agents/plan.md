@@ -108,11 +108,14 @@ carnelian-compiler/
 │   │   └── src/                   # glue: Node enum helpers, interning, Integer
 │   ├── carnelian-astgen/          # (opcional) binario de desarrollo para inspeccionar el generado
 │   ├── carnelian-compiler/        # BACKEND + irep + writer RITE (Rust puro)
-│   ├── carnelian-front-prism/     # Fase 1: adaptador ruby-prism (feature-gated, FFI)
-│   ├── carnelian-front-mri/       # Fase 3: adaptador lib-ruby-parser (Rust puro)
+│   ├── carnelian-front-prism/     # FFI: adaptador ruby-prism + lowering a owned (dev/CLI)
+│   ├── carnelian-front-mri/       # Fase 4: adaptador lib-ruby-parser (Rust puro)
 │   └── carnelian-cli/             # binario `carnelian`
 └── tests/                         # integración: invoca el CLI y compara bytes
 ```
+
+El acceso owned (`Owned` + `impl BackendNode`) vive en `carnelian-ast`
+(puro, shipping/wasm); cada frontend trae su propio lowering.
 
 Features de `carnelian-compiler`: `front-prism` (FFI), `front-mri`,
 `front-owned` (por defecto, puro). El perfil `shipping`/`web` no activa
