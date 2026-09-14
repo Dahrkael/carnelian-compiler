@@ -3742,12 +3742,6 @@ fn gen_rescue<N: BackendNode>(
                     scope.genop_3(session, opcode::OP_SEND, dst, sym, 1)?;
                 }
             } else {
-                if matches!(
-                    exception.kind_name(),
-                    "ConstantReadNode" | "ConstantPathNode"
-                ) {
-                    return Err(unsupported(&exception, "rescue exception"));
-                }
                 codegen(cg, exception, true)?;
                 cg.current().1.pop_n(1)?;
                 {

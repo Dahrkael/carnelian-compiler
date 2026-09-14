@@ -1,8 +1,8 @@
 //! P2.5 certification (rescue/ensure, splat, kwargs, masgn): `verify` compares
 //! `compile --frontend prism` against the pinned C golden, byte for byte, in
-//! both strip modes. Exit `0` required. Blocks, definitions, constants and
-//! pattern matching belong to other tranches and are locked as diagnostics
-//! below, never as diverging bytes.
+//! both strip modes. Exit `0` required. Pattern matching and the still-gated
+//! assignment targets are locked as diagnostics below, never as diverging
+//! bytes.
 
 use std::process::Command;
 
@@ -15,6 +15,22 @@ const SNIPPETS: &[(&str, &str)] = &[
     (
         "rescue_typed",
         "begin\n  1\nrescue get_exception\n  2\nrescue other_exception\n  3\nend\n",
+    ),
+    (
+        "rescue_typed_const",
+        "begin\n  1\nrescue TypeError\n  2\nend\n",
+    ),
+    (
+        "rescue_typed_const_path",
+        "begin\n  1\nrescue Foo::Bar\n  2\nend\n",
+    ),
+    (
+        "rescue_typed_const_ref",
+        "begin\n  1\nrescue TypeError => e\n  e\nend\n",
+    ),
+    (
+        "rescue_typed_const_multi",
+        "begin\n  1\nrescue TypeError, ArgumentError\n  2\nend\n",
     ),
     ("rescue_else", "begin\n  1\nrescue\n  2\nelse\n  3\nend\n"),
     (
@@ -104,11 +120,6 @@ const SNIPPETS: &[(&str, &str)] = &[
 /// Later-tranche syntax: compilation must fail with a diagnostic, and must
 /// never emit bytes that diverge from the reference.
 const GATED: &[(&str, &str, &str)] = &[
-    (
-        "typed_rescue_const_gated",
-        "begin\n  1\nrescue TypeError\n  2\nend\n",
-        "ConstantReadNode",
-    ),
     (
         "masgn_index_target_gated",
         "a = [0]\na[0], b = 1, 2\n",
