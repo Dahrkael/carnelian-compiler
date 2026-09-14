@@ -3,7 +3,7 @@
 //! Dispatch is on `kind_name` (1:1 with the C `switch` on node type); values
 //! travel through `BackendNode`, so FFI and owned frontends share handlers.
 
-use carnelian_ast::view::{BackendNode, SimpleLit};
+use carnelian_ast::view::{BackendNode, LvarRef, SimpleLit};
 
 use crate::codegen::{LoopType, Scope, Session, JMPLINK_START};
 use crate::diagnostics::{Diagnostic, Diagnostics};
@@ -17,8 +17,13 @@ use crate::CompileOptions;
 const CALL_ARG_LIMIT: usize = 14;
 const LIT_ARY_MAX: usize = 64;
 const VAL_STACK_MAX: u32 = 99;
-/// `CALL_MAXARGS` (splat/array marker for calls and `super`).
+/// `CALL_MAXARGS`: argument count marking an array-gathered list (`gen_call`).
 const CALL_MAXARGS: i32 = 15;
+/// Catch handler kinds (`enum mrc_catch_type`).
+const CATCH_RESCUE: u8 = 0;
+const CATCH_ENSURE: u8 = 1;
+/// `$!` symbol (`MRC_SYM_2(errinfo)`).
+const ERRINFO: &[u8] = b"$!";
 /// Stack threshold before flushing pending hash pairs: `GEN_VAL_STACK_MAX`,
 /// lifted past `INT16_MAX` once the cursor itself is past the small limit
 /// (kept separate so the future `gen_values` flush can share it).
@@ -276,6 +281,14 @@ fn unsupported<N: BackendNode>(node: &N, what: &str) -> Diagnostic {
     }
 }
 
+fn unsupported_text(what: &str) -> Diagnostic {
+    Diagnostic {
+        message: format!("unsupported {what} in P1"),
+        start: 0,
+        end: 0,
+    }
+}
+
 fn const_true<N: BackendNode>(node: &N) -> bool {
     matches!(
         node.kind_name(),
@@ -365,12 +378,23 @@ pub fn codegen<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(
         "AndNode" => gen_logic(cg, node, val, false),
         "OrNode" => gen_logic(cg, node, val, true),
         "LocalVariableReadNode" => gen_lvar_read(cg, node, val),
-        "LocalVariableWriteNode" => gen_lvar_write(cg, node, val),
+        "LocalVariableWriteNode" => {
+            let Some(target) = node.lvar_write() else {
+                return Err(unsupported(&node, "variable write"));
+            };
+            let value = target.value;
+            gen_assignment(cg, node, value, 0, val)
+        }
         "ItLocalVariableReadNode" => gen_it_read(cg, node, val),
         "BlockNode" => gen_block(cg, node, val),
         "LambdaNode" => gen_lambda(cg, node, val),
         "YieldNode" => gen_yield(cg, node, val),
         "BlockArgumentNode" => gen_block_arg(cg, node, val),
+        "BeginNode" => gen_begin_node(cg, node, val),
+        "RescueModifierNode" => gen_rescue_modifier(cg, node, val),
+        "MultiWriteNode" => gen_multi_write(cg, node, val),
+        "SplatNode" => gen_splat(cg, node, val),
+        "RetryNode" => gen_retry(cg, node, val),
         "TrueNode" | "FalseNode" | "NilNode" | "SelfNode" => gen_simple(cg, node, val),
         "DefNode" => gen_def(cg, node, val),
         "ClassNode" => gen_class(cg, node, val),
@@ -569,38 +593,68 @@ fn gen_lvar_read<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result
     }
 }
 
-fn gen_lvar_write<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
-    let Some(target) = node.lvar_write() else {
-        return Err(unsupported(&node, "variable write"));
-    };
-    let Some(rhs) = target.value else {
-        return Err(unsupported(&node, "bare write target"));
-    };
-    codegen(cg, rhs, true)?;
-    let depth = target.depth + u32::from(cg.scopes.last().expect("open scope").for_depth);
-    if depth != 0 {
-        // Upvar write (`gen_assignment_lvar` else branch): `SETUPVAR`.
-        let (slot, level) = cg.search_upvar(&target.name)?;
-        let (session, scope) = cg.current();
-        scope.pop_n(1)?;
-        let dst = scope.cursp();
-        scope.gen_setupvar(session, dst, slot, level, val)?;
-        if val {
-            let (_, scope) = cg.current();
-            scope.push_n(1)?;
+/// Local assignment (`gen_assignment_lvar`): a move into the local slot.
+fn gen_assignment_lvar(
+    cg: &mut Codegen,
+    sp: u16,
+    name: &[u8],
+    depth: u32,
+    val: bool,
+) -> Result<(), Diagnostic> {
+    if depth == 0 {
+        let index = cg.current().1.lv_idx(name);
+        if index != sp {
+            let (session, scope) = cg.current();
+            scope.gen_move(session, index, sp, val)?;
         }
-        return Ok(());
+        Ok(())
+    } else {
+        let (slot, level) = cg.search_upvar(name)?;
+        let (session, scope) = cg.current();
+        scope.gen_setupvar(session, sp, slot, level, val)
     }
-    let (session, scope) = cg.current();
-    scope.pop_n(1)?;
-    let sp = scope.cursp();
-    let index = scope.lv_idx(&target.name);
-    if index != sp {
-        scope.gen_move(session, index, sp, val)?;
+}
+
+/// Assignment to one target (`gen_assignment`): local writes/targets and
+/// nested multiple targets; other target kinds belong to later tranches.
+fn gen_assignment<N: BackendNode>(
+    cg: &mut Codegen,
+    tree: N,
+    rhs: Option<N>,
+    mut sp: u16,
+    val: bool,
+) -> Result<(), Diagnostic> {
+    match tree.kind_name() {
+        "LocalVariableWriteNode" | "LocalVariableTargetNode" | "RequiredParameterNode" => {
+            if let Some(value) = rhs {
+                codegen(cg, value, true)?;
+                cg.current().1.pop_n(1)?;
+                sp = cg.current().1.cursp();
+            }
+            let target = if tree.kind_name() == "LocalVariableWriteNode" {
+                tree.lvar_write().map(|write| LvarRef {
+                    name: write.name,
+                    depth: write.depth,
+                })
+            } else {
+                tree.lvar_target()
+            };
+            let Some(target) = target else {
+                return Err(unsupported(&tree, "assignment target"));
+            };
+            let depth = target.depth + u32::from(cg.current().1.for_depth);
+            gen_assignment_lvar(cg, sp, &target.name, depth, val)?;
+        }
+        "MultiTargetNode" => {
+            let Some(view) = tree.multi_target_view() else {
+                return Err(unsupported(&tree, "assignment target"));
+            };
+            gen_massignment(cg, view.lefts, view.rest, view.rights, i32::from(sp), val)?;
+        }
+        _ => return Err(unsupported(&tree, "assignment target")),
     }
     if val {
-        let (_, scope) = cg.current();
-        scope.push_n(1)?;
+        cg.current().1.push_n(1)?;
     }
     Ok(())
 }
@@ -945,35 +999,129 @@ fn gen_yield<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(),
     Ok(())
 }
 
-/// Positional values with the `> limit` array packing (`gen_values`).
+/// Positional values (`gen_values_upto` over all arguments): plain values
+/// stack up; a splat or the size threshold flushes them into an array with
+/// `ARRAY`/`ARYPUSH`, `ARYCAT` absorbs each splat, and the `-1` protocol
+/// tells the caller a variable-length list sits at the cursor.
 fn gen_values<N: BackendNode>(
     cg: &mut Codegen,
     items: Vec<N>,
     val: bool,
     limit: usize,
 ) -> Result<i32, Diagnostic> {
+    if items.is_empty() {
+        return Ok(0);
+    }
+    let mut limit = if limit == 0 { LIT_ARY_MAX } else { limit };
+    let mut n: i32 = 0;
+    let mut first = true;
+    let slimit = val_stack_limit(cg.current().1.cursp());
+
     if !val {
         for item in items {
             codegen(cg, item, false)?;
+            n += 1;
         }
-        return Ok(0);
+        return Ok(n);
     }
-    // The stack-flush path only triggers on splat/forwarding forms or past
-    // 99 registers; both are gated out of P1, so plain codegen suffices.
-    let mut count = 0;
+
     for item in items {
-        codegen(cg, item, true)?;
-        count += 1;
+        if item.kind_name() == "KeywordHashNode" {
+            break;
+        }
+        let is_splat = item.kind_name() == "SplatNode";
+        let is_forwarding = item.kind_name() == "ForwardingArgumentsNode";
+        if is_splat || is_forwarding || u32::from(cg.current().1.cursp()) >= slimit {
+            cg.current().1.pop_n(n as u16)?;
+            if first {
+                if n == 0 {
+                    let (session, scope) = cg.current();
+                    let dst = scope.cursp();
+                    scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+                } else {
+                    let (session, scope) = cg.current();
+                    let dst = scope.cursp();
+                    scope.genop_2(session, opcode::OP_ARRAY, dst, n as u16)?;
+                }
+                cg.current().1.push_n(1)?;
+                first = false;
+                limit = LIT_ARY_MAX;
+            } else if n > 0 {
+                cg.current().1.pop_n(1)?;
+                let (session, scope) = cg.current();
+                let dst = scope.cursp();
+                scope.genop_2(session, opcode::OP_ARYPUSH, dst, n as u16)?;
+                cg.current().1.push_n(1)?;
+            }
+            n = 0;
+        }
+        if is_splat {
+            let Some(inner) = item.splat_value() else {
+                return Err(unsupported(&item, "splat"));
+            };
+            match inner {
+                Some(expression) => codegen(cg, expression, val)?,
+                None => gen_lvar(cg, b"*", 0)?,
+            }
+            cg.current().1.pop_n(2)?;
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_1(session, opcode::OP_ARYCAT, dst)?;
+            cg.current().1.push_n(1)?;
+        } else if is_forwarding {
+            return Err(unsupported(&item, "forwarding arguments"));
+        } else {
+            codegen(cg, item, val)?;
+            n += 1;
+        }
     }
-    let limit = if limit == 0 { LIT_ARY_MAX } else { limit };
-    if count > limit {
+
+    if !first {
+        cg.current().1.pop_n(1)?;
+        if n > 0 {
+            cg.current().1.pop_n(n as u16)?;
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_2(session, opcode::OP_ARYPUSH, dst, n as u16)?;
+        }
+        return Ok(-1);
+    } else if n > limit as i32 {
+        cg.current().1.pop_n(n as u16)?;
         let (session, scope) = cg.current();
-        scope.pop_n(count as u16)?;
         let dst = scope.cursp();
-        scope.genop_2(session, opcode::OP_ARRAY, dst, count as u16)?;
+        scope.genop_2(session, opcode::OP_ARRAY, dst, n as u16)?;
         return Ok(-1);
     }
-    Ok(count as i32)
+    Ok(n)
+}
+
+/// Local variable load into the cursor (`gen_lvar`).
+fn gen_lvar(cg: &mut Codegen, name: &[u8], depth: u32) -> Result<(), Diagnostic> {
+    if depth == 0 {
+        let index = cg.current().1.lv_idx(name);
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.gen_move(session, dst, index, true)?;
+    } else {
+        return Err(unsupported_text("upvar read"));
+    }
+    cg.current().1.push_n(1)
+}
+
+/// Splatted value as an expression (`PM_SPLAT_NODE`).
+fn gen_splat<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(splat) = node.splat_value() else {
+        return Err(unsupported(&node, "splat"));
+    };
+    match splat {
+        Some(expression) => codegen(cg, expression, val),
+        None => {
+            if val {
+                gen_lvar(cg, b"*", 0)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 /// `+`/`-` folding onto an integer load (`gen_addsub`).
@@ -1151,17 +1299,39 @@ fn gen_call<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), 
         )?;
     }
     let mut nargs: i32 = 0;
+    let mut nk: i32 = 0;
     if let Some(args) = view.args {
-        let Some(items) = args.call_args() else {
+        if args.args_forwarding() {
+            return Err(unsupported(&node, "forwarding arguments"));
+        }
+        let Some(mut items) = args.call_args() else {
             return Err(unsupported(&node, "complex arguments"));
+        };
+        // Keyword arguments follow the positional ones in a single
+        // `KeywordHashNode`; `gen_values` stops at it.
+        let keywords = match items
+            .iter()
+            .position(|item| item.kind_name() == "KeywordHashNode")
+        {
+            Some(first) => items.split_off(first),
+            None => Vec::new(),
         };
         if !items.is_empty() {
             nargs = gen_values(cg, items, true, CALL_ARG_LIMIT)?;
             if nargs < 0 {
-                // Variable length (only via the gated splat flush in C).
                 noop = true;
-                nargs = 15;
+                nargs = CALL_MAXARGS;
                 cg.current().1.push_n(1)?;
+            }
+        }
+        for keyword in keywords {
+            let Some(elements) = keyword.hash_elements() else {
+                return Err(unsupported(&keyword, "keyword arguments"));
+            };
+            noop = true;
+            nk = gen_hash(cg, elements, true, CALL_ARG_LIMIT)?;
+            if nk < 0 {
+                nk = CALL_MAXARGS;
             }
         }
     }
@@ -1180,7 +1350,7 @@ fn gen_call<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), 
         scope.pop_n(1)?;
         scope.sp = sp_save;
     }
-    emit_call(cg, noself, noop, blk, &name, nargs, val, safe, skip)
+    emit_call(cg, noself, noop, blk, &name, nargs, nk, val, safe, skip)
 }
 
 /// Direct single-operand operator selection (`*`, `/`, comparisons).
@@ -1206,6 +1376,7 @@ fn emit_call(
     blk: bool,
     name: &[u8],
     nargs: i32,
+    nk: i32,
     val: bool,
     safe: bool,
     skip: u32,
@@ -1222,12 +1393,12 @@ fn emit_call(
         } else if gen_binop(cg, name, dst)? {
             // An index opcode was emitted.
         } else {
-            send_call(cg, noself, blk, name, nargs, dst)?;
+            send_call(cg, noself, blk, name, nargs, nk, dst)?;
         }
     } else if !noop && nargs == 0 && gen_uniop(cg, name, dst)? {
         // A literal absorbed its sign.
     } else {
-        send_call(cg, noself, blk, name, nargs, dst)?;
+        send_call(cg, noself, blk, name, nargs, nk, dst)?;
     }
     if safe {
         cg.current().1.dispatch(skip)?;
@@ -1238,36 +1409,46 @@ fn emit_call(
     Ok(())
 }
 
-/// Generic `SEND`/`SSEND` emission (`SENDB`/`SSENDB` when a block is present).
+/// Generic `SEND`/`SSEND` emission. The argument byte packs the positional
+/// count in the low nibble and the keyword-table flag in the high nibble
+/// (`n|(nk<<4)`), with `CALL_MAXARGS` marking a variable-length list.
 fn send_call(
     cg: &mut Codegen,
     noself: bool,
     blk: bool,
     name: &[u8],
     nargs: i32,
+    nk: i32,
     dst: u16,
 ) -> Result<(), Diagnostic> {
     let sym = {
         let (session, scope) = cg.current();
         scope.new_sym(session, name)?
     };
+    let packed = ((nargs as u8) & 0x0f) | (((nk as u8) & 0x0f) << 4);
     if noself {
         let (session, scope) = cg.current();
-        if !blk && nargs == 0 {
+        if !blk && nargs == 0 && nk == 0 {
             scope.genop_2(session, opcode::OP_SSEND0, dst, sym)?;
-        } else if blk {
-            scope.genop_3(session, opcode::OP_SSENDB, dst, sym, nargs as u8)?;
         } else {
-            scope.genop_3(session, opcode::OP_SSEND, dst, sym, nargs as u8)?;
+            let op = if blk {
+                opcode::OP_SSENDB
+            } else {
+                opcode::OP_SSEND
+            };
+            scope.genop_3(session, op, dst, sym, packed)?;
         }
     } else {
         let (session, scope) = cg.current();
-        if !blk && nargs == 0 {
+        if !blk && nargs == 0 && nk == 0 {
             scope.genop_2(session, opcode::OP_SEND0, dst, sym)?;
-        } else if blk {
-            scope.genop_3(session, opcode::OP_SENDB, dst, sym, nargs as u8)?;
         } else {
-            scope.genop_3(session, opcode::OP_SEND, dst, sym, nargs as u8)?;
+            let op = if blk {
+                opcode::OP_SENDB
+            } else {
+                opcode::OP_SEND
+            };
+            scope.genop_3(session, op, dst, sym, packed)?;
         }
     }
     Ok(())
@@ -2302,6 +2483,701 @@ fn gen_zsuper<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<()
         let dst = scope.cursp();
         scope.genop_2(session, opcode::OP_SUPER, dst, count as u16)?;
     }
+    if val {
+        cg.current().1.push_n(1)?;
+    }
+    Ok(())
+}
+
+/// Whether an array literal's elements include a splat
+/// (`PM_ARRAY_NODE_FLAGS_CONTAINS_SPLAT`).
+fn array_contains_splat<N: BackendNode>(node: &N) -> bool {
+    node.array_elements()
+        .is_some_and(|elements| elements.iter().any(|item| item.kind_name() == "SplatNode"))
+}
+
+/// Multiple assignment (`PM_MULTI_WRITE_NODE`). A fixed array right-hand side
+/// in statement position reads its elements in place; anything else evaluates
+/// the right-hand side and destructures with `gen_massignment`.
+fn gen_multi_write<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(view) = node.multi_write_view() else {
+        return Err(unsupported(&node, "multiple assignment"));
+    };
+    let lefts = view.lefts;
+    let rest = view.rest;
+    let rights = view.rights;
+    let value = view.value;
+    let rhs = i32::from(cg.current().1.cursp());
+
+    if !val && value.kind_name() == "ArrayNode" && !array_contains_splat(&value) {
+        let Some(elements) = value.array_elements() else {
+            return Err(unsupported(&value, "array elements"));
+        };
+        let len = elements.len();
+        for element in elements {
+            codegen(cg, element, true)?;
+        }
+        let mut n = 0usize;
+        for (index, left) in lefts.into_iter().enumerate() {
+            if index < len {
+                gen_assignment(cg, left, None, (rhs + n as i32) as u16, false)?;
+                n += 1;
+            } else {
+                let sp = cg.current().1.cursp();
+                let (session, scope) = cg.current();
+                scope.genop_1(session, opcode::OP_LOADNIL, sp)?;
+                scope.push_n(1)?;
+                gen_assignment(cg, left, None, sp, false)?;
+                cg.current().1.pop_n(1)?;
+            }
+        }
+        let post = rights.len();
+        if let Some(rest_node) = rest {
+            let rn = if len < post + n { 0 } else { len - post - n };
+            if rest_node.kind_name() != "ImplicitRestNode" {
+                emit_aref_group(cg, rhs, n, rn)?;
+                if let Some(Some(expression)) = rest_node.splat_value() {
+                    let sp = cg.current().1.cursp();
+                    cg.current().1.push_n(1)?;
+                    gen_assignment(cg, expression, None, sp, false)?;
+                    cg.current().1.pop_n(1)?;
+                }
+            }
+            n += rn;
+        }
+        if post > 0 {
+            for right in rights {
+                if n < len {
+                    gen_assignment(cg, right, None, (rhs + n as i32) as u16, false)?;
+                } else {
+                    let sp = cg.current().1.cursp();
+                    let (session, scope) = cg.current();
+                    scope.genop_1(session, opcode::OP_LOADNIL, sp)?;
+                    scope.push_n(1)?;
+                    gen_assignment(cg, right, None, sp, false)?;
+                    cg.current().1.pop_n(1)?;
+                }
+                n += 1;
+            }
+        }
+        cg.current().1.pop_n(len as u16)?;
+    } else {
+        codegen(cg, value, true)?;
+        gen_massignment(cg, lefts, rest, rights, rhs, val)?;
+        if !val {
+            cg.current().1.pop_n(1)?;
+        }
+    }
+    Ok(())
+}
+
+/// The `ARRAY`/`ARRAY2` slice a fixed right-hand side leaves for a rest
+/// target (`gen_massignment` fixed path).
+fn emit_aref_group(cg: &mut Codegen, rhs: i32, n: usize, rn: usize) -> Result<(), Diagnostic> {
+    let (session, scope) = cg.current();
+    let dst = scope.cursp();
+    if i32::from(dst) == rhs + n as i32 {
+        scope.genop_2(session, opcode::OP_ARRAY, dst, rn as u16)
+    } else {
+        scope.genop_3(
+            session,
+            opcode::OP_ARRAY2,
+            dst,
+            (rhs + n as i32) as u16,
+            rn as u8,
+        )
+    }
+}
+
+/// Destructuring assignment (`gen_massignment`): `AREF` reads the pre targets
+/// and `APOST` splits the rest and post targets from the array at `rhs`.
+#[allow(clippy::too_many_arguments)]
+fn gen_massignment<N: BackendNode>(
+    cg: &mut Codegen,
+    lefts: Vec<N>,
+    rest: Option<N>,
+    rights: Vec<N>,
+    rhs: i32,
+    val: bool,
+) -> Result<(), Diagnostic> {
+    let n = lefts.len() as i32;
+    let post = rights.len() as i32;
+    let has_rest = rest
+        .as_ref()
+        .is_some_and(|node| node.kind_name() != "ImplicitRestNode");
+    let mut base = rhs;
+    let mut idx = 0i32;
+    if post > 255 {
+        return Err(Diagnostic {
+            message: "too many post-splat assignment targets".to_owned(),
+            start: 0,
+            end: 0,
+        });
+    }
+    let mut scratch = gen_aref_scratch(cg, n)?;
+    if n > 0 {
+        for left in lefts {
+            if idx == 255 {
+                base = gen_aref_rebase(cg, base, scratch)?;
+                idx = 0;
+            }
+            let sp = cg.current().1.cursp();
+            {
+                let (session, scope) = cg.current();
+                scope.genop_3(session, opcode::OP_AREF, sp, base as u16, idx as u8)?;
+            }
+            idx += 1;
+            cg.current().1.push_n(1)?;
+            gen_assignment(cg, left, None, sp, false)?;
+            cg.current().1.pop_n(1)?;
+        }
+    }
+    if has_rest || post > 0 {
+        {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.gen_move(session, dst, base as u16, val)?;
+        }
+        let sp = cg.current().1.cursp();
+        cg.current().1.push_n((post + 1) as u16)?;
+        {
+            let (session, scope) = cg.current();
+            scope.genop_3(session, opcode::OP_APOST, sp, idx as u16, post as u8)?;
+        }
+        if has_rest {
+            let rest_node = rest.expect("rest");
+            if let Some(Some(expression)) = rest_node.splat_value() {
+                gen_assignment(cg, expression, None, sp, false)?;
+            }
+        }
+        for (index, right) in rights.into_iter().enumerate() {
+            gen_assignment(cg, right, None, sp + index as u16 + 1, false)?;
+        }
+        cg.current().1.pop_n((post + 1) as u16)?;
+        if scratch >= 0 {
+            cg.current().1.pop_n(1)?;
+            scratch = -1;
+        }
+        if val {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.gen_move(session, dst, rhs as u16, false)?;
+        }
+    }
+    if scratch >= 0 {
+        cg.current().1.pop_n(1)?;
+    }
+    Ok(())
+}
+
+/// Scratch register reserved for the `AREF` walk (`gen_aref_scratch`).
+fn gen_aref_scratch(cg: &mut Codegen, len: i32) -> Result<i32, Diagnostic> {
+    if len <= 255 {
+        return Ok(-1);
+    }
+    let scratch = i32::from(cg.current().1.cursp());
+    cg.current().1.push_n(1)?;
+    Ok(scratch)
+}
+
+/// Rebase the `AREF` walk every 255 elements (`gen_aref_rebase`).
+fn gen_aref_rebase(cg: &mut Codegen, base: i32, scratch: i32) -> Result<i32, Diagnostic> {
+    if base != scratch {
+        let (session, scope) = cg.current();
+        scope.gen_move(session, scratch as u16, base as u16, false)?;
+    }
+    {
+        let (session, scope) = cg.current();
+        scope.genop_3(session, opcode::OP_APOST, scratch as u16, 255, 0)?;
+    }
+    Ok(scratch)
+}
+
+/// Begin body (`gen_begin`): a null subtree emits `LOADNIL` only when valued,
+/// while an empty statements node emits nothing.
+fn gen_begin<N: BackendNode>(
+    cg: &mut Codegen,
+    statements: Option<Vec<N>>,
+    val: bool,
+) -> Result<(), Diagnostic> {
+    if val && statements.is_none() {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+        scope.push_n(1)?;
+    }
+    if let Some(items) = statements {
+        let last = items.len();
+        for (index, item) in items.into_iter().enumerate() {
+            let item_val = if index + 1 < last { false } else { val };
+            codegen(cg, item, item_val)?;
+        }
+    }
+    Ok(())
+}
+
+/// One `rescue` clause (`gen_rescue`), including `=> e` and `$!` save/restore.
+#[allow(clippy::too_many_arguments)]
+fn gen_rescue<N: BackendNode>(
+    cg: &mut Codegen,
+    node: N,
+    pos1: &mut u32,
+    exc: u16,
+    extend: &mut u32,
+    val: bool,
+    errsave: u16,
+    landing: u16,
+) -> Result<(), Diagnostic> {
+    let Some(view) = node.rescue_view() else {
+        return Err(unsupported(&node, "rescue"));
+    };
+    cg.current().1.dispatch(*pos1)?;
+    let mut pos2 = JMPLINK_START;
+    if view.exceptions.is_empty() {
+        {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            let sym = scope.new_sym(session, b"StandardError")?;
+            scope.genop_2(session, opcode::OP_GETCONST, dst, sym)?;
+        }
+        cg.current().1.push_n(1)?;
+        cg.current().1.pop_n(1)?;
+        {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_2(session, opcode::OP_RESCUE, exc, dst)?;
+        }
+        let cur = cg.current().1.cursp();
+        let tmp = {
+            let (session, scope) = cg.current();
+            scope.genjmp2(session, opcode::OP_JMPIF, cur, pos2, val)?
+        };
+        pos2 = tmp;
+    } else {
+        for exception in view.exceptions {
+            if exception.kind_name() == "SplatNode" {
+                let Some(inner) = exception.splat_value() else {
+                    return Err(unsupported(&exception, "splat"));
+                };
+                match inner {
+                    Some(expression) => codegen(cg, expression, true)?,
+                    None => gen_lvar(cg, b"*", 0)?,
+                }
+                {
+                    let (session, scope) = cg.current();
+                    let dst = scope.cursp();
+                    scope.gen_move(session, dst, exc, false)?;
+                }
+                cg.current().1.push_n(2)?;
+                cg.current().1.pop_n(2)?;
+                cg.current().1.pop_n(1)?;
+                {
+                    let (session, scope) = cg.current();
+                    let dst = scope.cursp();
+                    let sym = scope.new_sym(session, b"__case_eqq")?;
+                    scope.genop_3(session, opcode::OP_SEND, dst, sym, 1)?;
+                }
+            } else {
+                if matches!(
+                    exception.kind_name(),
+                    "ConstantReadNode" | "ConstantPathNode"
+                ) {
+                    return Err(unsupported(&exception, "rescue exception"));
+                }
+                codegen(cg, exception, true)?;
+                cg.current().1.pop_n(1)?;
+                {
+                    let (session, scope) = cg.current();
+                    let dst = scope.cursp();
+                    scope.genop_2(session, opcode::OP_RESCUE, exc, dst)?;
+                }
+            }
+            let cur = cg.current().1.cursp();
+            let tmp = {
+                let (session, scope) = cg.current();
+                scope.genjmp2(session, opcode::OP_JMPIF, cur, pos2, val)?
+            };
+            pos2 = tmp;
+        }
+    }
+    *pos1 = cg.current().1.genjmp(opcode::OP_JMP, JMPLINK_START)?;
+    cg.current().1.dispatch_linked(pos2)?;
+    cg.current().1.pop_n(1)?;
+    {
+        let (session, scope) = cg.current();
+        let sym = scope.new_sym(session, ERRINFO)?;
+        scope.genop_2(session, opcode::OP_SETGV, exc, sym)?;
+    }
+    if let Some(reference) = view.reference {
+        gen_assignment(cg, reference, None, exc, false)?;
+    }
+    gen_branch(cg, view.statements, val)?;
+    if val {
+        cg.current().1.pop_n(1)?;
+    }
+    {
+        let (session, scope) = cg.current();
+        let sym = scope.new_sym(session, ERRINFO)?;
+        scope.genop_2(session, opcode::OP_SETGV, errsave, sym)?;
+    }
+    if val {
+        let src = cg.current().1.cursp();
+        let (session, scope) = cg.current();
+        scope.gen_move(session, landing, src, false)?;
+    }
+    *extend = cg.current().1.genjmp(opcode::OP_JMP, *extend)?;
+    cg.current().1.push_n(1)?;
+    if let Some(subsequent) = view.subsequent {
+        gen_rescue(cg, subsequent, pos1, exc, extend, val, errsave, landing)?;
+    }
+    Ok(())
+}
+
+/// Ensure body (`gen_ensure`): runs on normal exit and while unwinding, and
+/// restores `$!` on the way out.
+fn gen_ensure<N: BackendNode>(
+    cg: &mut Codegen,
+    statements: Option<Vec<N>>,
+    catch_entry: usize,
+    begin: u32,
+) -> Result<(), Diagnostic> {
+    cg.current().1.push_n(1)?;
+    let ensure_end = cg.current().1.pc;
+    cg.current().1.push_n(1)?;
+    let idx = cg.current().1.cursp();
+    {
+        let (session, scope) = cg.current();
+        scope.genop_1(session, opcode::OP_EXCEPT, idx)?;
+    }
+    cg.current().1.push_n(1)?;
+    let errsave = cg.current().1.cursp();
+    {
+        let (session, scope) = cg.current();
+        let sym = scope.new_sym(session, ERRINFO)?;
+        scope.genop_2(session, opcode::OP_GETGV, errsave, sym)?;
+    }
+    cg.current().1.push_n(1)?;
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_1(session, opcode::OP_OCLASS, dst)?;
+        let sym = scope.new_sym(session, b"Exception")?;
+        scope.genop_2(session, opcode::OP_GETMCNST, dst, sym)?;
+    }
+    cg.current().1.push_n(1)?;
+    cg.current().1.pop_n(1)?;
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_RESCUE, idx, dst)?;
+    }
+    let skip = {
+        let (session, scope) = cg.current();
+        let cur = scope.cursp();
+        scope.genjmp2(session, opcode::OP_JMPNOT, cur, JMPLINK_START, false)?
+    };
+    {
+        let (session, scope) = cg.current();
+        let sym = scope.new_sym(session, ERRINFO)?;
+        scope.genop_2(session, opcode::OP_SETGV, idx, sym)?;
+    }
+    cg.current().1.dispatch(skip)?;
+    let body_catch = cg.current().1.catch_new();
+    let body_begin = cg.current().1.pc;
+    if let Some(items) = statements {
+        gen_list(cg, items, false)?;
+    }
+    {
+        let (session, scope) = cg.current();
+        let sym = scope.new_sym(session, ERRINFO)?;
+        scope.genop_2(session, opcode::OP_SETGV, errsave, sym)?;
+    }
+    let restored = cg.current().1.genjmp(opcode::OP_JMP, JMPLINK_START)?;
+    let body_end = cg.current().1.pc;
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_1(session, opcode::OP_EXCEPT, dst)?;
+        let sym = scope.new_sym(session, ERRINFO)?;
+        scope.genop_2(session, opcode::OP_SETGV, errsave, sym)?;
+        scope.genop_1(session, opcode::OP_RAISEIF, dst)?;
+    }
+    cg.current()
+        .1
+        .catch_set(body_catch, CATCH_ENSURE, body_begin, body_end, body_end);
+    cg.current().1.dispatch(restored)?;
+    cg.current().1.pop_n(1)?;
+    cg.current().1.pop_n(1)?;
+    {
+        let (session, scope) = cg.current();
+        scope.genop_1(session, opcode::OP_RAISEIF, idx)?;
+    }
+    cg.current().1.pop_n(1)?;
+    cg.current()
+        .1
+        .catch_set(catch_entry, CATCH_ENSURE, begin, ensure_end, ensure_end);
+    Ok(())
+}
+
+/// `begin` with rescue/else/ensure (`PM_BEGIN_NODE`).
+fn gen_begin_node<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(view) = node.begin_view() else {
+        return Err(unsupported(&node, "begin"));
+    };
+    let has_rescue = view.rescue_clause.is_some();
+    let has_else = view.else_clause.is_some();
+    let has_ensure = view.ensure_clause.is_some();
+    if !has_rescue && !has_else && !has_ensure {
+        return gen_begin(cg, view.statements, val);
+    }
+
+    let mut ensure_catch_entry: Option<usize> = None;
+    let mut ensure_begin = 0u32;
+    if let Some(ensure_clause) = &view.ensure_clause {
+        if let Some(ensure_view) = ensure_clause.ensure_view() {
+            if ensure_view.statements.is_some() {
+                ensure_catch_entry = Some(cg.current().1.catch_new());
+                ensure_begin = cg.current().1.pc;
+            }
+        }
+    }
+
+    let catch_entry;
+    let begin;
+    {
+        let (_, scope) = cg.current();
+        scope.loop_push(LoopType::Begin);
+        let pc0 = scope.new_label();
+        scope.loops.last_mut().expect("loop").pc0 = pc0;
+        catch_entry = scope.catch_new();
+        begin = scope.pc;
+    }
+    gen_begin(cg, view.statements, true)?;
+    cg.current().1.pop_n(1)?;
+    cg.current().1.loops.last_mut().expect("loop").kind = LoopType::Rescue;
+    let end = cg.current().1.pc;
+    let noexc = cg.current().1.genjmp(opcode::OP_JMP, JMPLINK_START)?;
+    let target = cg.current().1.pc;
+    cg.current()
+        .1
+        .catch_set(catch_entry, CATCH_RESCUE, begin, end, target);
+
+    let mut exend = JMPLINK_START;
+    let mut pos1 = JMPLINK_START;
+    if let Some(rescue) = view.rescue_clause {
+        let landing = cg.current().1.cursp();
+        cg.current().1.push_n(1)?;
+        let errsave = cg.current().1.cursp();
+        {
+            let (session, scope) = cg.current();
+            let sym = scope.new_sym(session, ERRINFO)?;
+            scope.genop_2(session, opcode::OP_GETGV, errsave, sym)?;
+        }
+        cg.current().1.push_n(1)?;
+        let exc = cg.current().1.cursp();
+        {
+            let (session, scope) = cg.current();
+            scope.genop_1(session, opcode::OP_EXCEPT, exc)?;
+        }
+        cg.current().1.push_n(1)?;
+        let err_catch = cg.current().1.catch_new();
+        let err_begin = cg.current().1.pc;
+        gen_rescue(
+            cg, rescue, &mut pos1, exc, &mut exend, val, errsave, landing,
+        )?;
+        if pos1 != JMPLINK_START {
+            cg.current().1.dispatch(pos1)?;
+            let (session, scope) = cg.current();
+            let sym = scope.new_sym(session, ERRINFO)?;
+            scope.genop_2(session, opcode::OP_SETGV, errsave, sym)?;
+            scope.genop_1(session, opcode::OP_RAISEIF, exc)?;
+        }
+        cg.current().1.pop_n(1)?;
+        cg.current().1.push_n(1)?;
+        let err_end = cg.current().1.pc;
+        cg.current().1.push_n(1)?;
+        let idx = cg.current().1.cursp();
+        {
+            let (session, scope) = cg.current();
+            scope.genop_1(session, opcode::OP_EXCEPT, idx)?;
+            let sym = scope.new_sym(session, ERRINFO)?;
+            scope.genop_2(session, opcode::OP_SETGV, errsave, sym)?;
+            scope.genop_1(session, opcode::OP_RAISEIF, idx)?;
+        }
+        cg.current().1.pop_n(1)?;
+        cg.current().1.pop_n(1)?;
+        cg.current()
+            .1
+            .catch_set(err_catch, CATCH_ENSURE, err_begin, err_end, err_end);
+        cg.current().1.pop_n(1)?;
+    }
+    cg.current().1.pop_n(1)?;
+    cg.current().1.dispatch(noexc)?;
+    if let Some(else_clause) = view.else_clause {
+        codegen(cg, else_clause, val)?;
+    } else if val {
+        cg.current().1.push_n(1)?;
+    }
+    cg.current().1.dispatch_linked(exend)?;
+    {
+        let (session, scope) = cg.current();
+        scope.loop_pop(session, false)?;
+    }
+    if let Some(ensure_clause) = view.ensure_clause {
+        let statements = ensure_clause
+            .ensure_view()
+            .and_then(|ensure_view| ensure_view.statements);
+        if let Some(statements) = statements {
+            if has_rescue {
+                cg.current().1.pop_n(1)?;
+            }
+            gen_ensure(
+                cg,
+                Some(statements),
+                ensure_catch_entry.expect("ensure catch entry"),
+                ensure_begin,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// `expr rescue expr` (`PM_RESCUE_MODIFIER_NODE`).
+fn gen_rescue_modifier<N: BackendNode>(
+    cg: &mut Codegen,
+    node: N,
+    val: bool,
+) -> Result<(), Diagnostic> {
+    let Some(view) = node.rescue_modifier_view() else {
+        return Err(unsupported(&node, "rescue modifier"));
+    };
+    let catch_entry;
+    let begin_pos;
+    {
+        let (_, scope) = cg.current();
+        scope.loop_push(LoopType::Begin);
+        let pc0 = scope.new_label();
+        scope.loops.last_mut().expect("loop").pc0 = pc0;
+        catch_entry = scope.catch_new();
+        begin_pos = scope.pc;
+    }
+    codegen(cg, view.expression, val)?;
+    if val {
+        cg.current().1.pop_n(1)?;
+    }
+    cg.current().1.loops.last_mut().expect("loop").kind = LoopType::Rescue;
+    let end_pos = cg.current().1.pc;
+    let noexc = cg.current().1.genjmp(opcode::OP_JMP, JMPLINK_START)?;
+    let target = cg.current().1.pc;
+    cg.current()
+        .1
+        .catch_set(catch_entry, CATCH_RESCUE, begin_pos, end_pos, target);
+
+    let landing = cg.current().1.cursp();
+    cg.current().1.push_n(1)?;
+    let errsave = cg.current().1.cursp();
+    {
+        let (session, scope) = cg.current();
+        let sym = scope.new_sym(session, ERRINFO)?;
+        scope.genop_2(session, opcode::OP_GETGV, errsave, sym)?;
+    }
+    cg.current().1.push_n(1)?;
+    let exc = cg.current().1.cursp();
+    {
+        let (session, scope) = cg.current();
+        scope.genop_1(session, opcode::OP_EXCEPT, exc)?;
+    }
+    cg.current().1.push_n(1)?;
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        let sym = scope.new_sym(session, b"StandardError")?;
+        scope.genop_2(session, opcode::OP_GETCONST, dst, sym)?;
+    }
+    cg.current().1.push_n(1)?;
+    cg.current().1.pop_n(1)?;
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_RESCUE, exc, dst)?;
+    }
+    let rescue_jmp = {
+        let (session, scope) = cg.current();
+        let cur = scope.cursp();
+        scope.genjmp2(session, opcode::OP_JMPIF, cur, JMPLINK_START, val)?
+    };
+    {
+        let (session, scope) = cg.current();
+        scope.genop_1(session, opcode::OP_RAISEIF, exc)?;
+    }
+    cg.current().1.dispatch(rescue_jmp)?;
+    cg.current().1.pop_n(1)?;
+    {
+        let (session, scope) = cg.current();
+        let sym = scope.new_sym(session, ERRINFO)?;
+        scope.genop_2(session, opcode::OP_SETGV, exc, sym)?;
+    }
+    let err_catch = cg.current().1.catch_new();
+    let err_begin = cg.current().1.pc;
+    codegen(cg, view.rescue_expression, val)?;
+    if val {
+        cg.current().1.pop_n(1)?;
+    }
+    {
+        let (session, scope) = cg.current();
+        let sym = scope.new_sym(session, ERRINFO)?;
+        scope.genop_2(session, opcode::OP_SETGV, errsave, sym)?;
+    }
+    if val {
+        let src = cg.current().1.cursp();
+        let (session, scope) = cg.current();
+        scope.gen_move(session, landing, src, false)?;
+    }
+    let restored = cg.current().1.genjmp(opcode::OP_JMP, JMPLINK_START)?;
+    {
+        let err_end = cg.current().1.pc;
+        cg.current().1.push_n(1)?;
+        let idx = cg.current().1.cursp();
+        {
+            let (session, scope) = cg.current();
+            scope.genop_1(session, opcode::OP_EXCEPT, idx)?;
+            let sym = scope.new_sym(session, ERRINFO)?;
+            scope.genop_2(session, opcode::OP_SETGV, errsave, sym)?;
+            scope.genop_1(session, opcode::OP_RAISEIF, idx)?;
+        }
+        cg.current().1.pop_n(1)?;
+        cg.current()
+            .1
+            .catch_set(err_catch, CATCH_ENSURE, err_begin, err_end, err_end);
+    }
+    cg.current().1.pop_n(1)?;
+    cg.current().1.pop_n(1)?;
+    cg.current().1.dispatch(restored)?;
+    cg.current().1.dispatch(noexc)?;
+    if val {
+        cg.current().1.push_n(1)?;
+    }
+    {
+        let (session, scope) = cg.current();
+        scope.loop_pop(session, false)?;
+    }
+    Ok(())
+}
+
+/// `retry` (`PM_RETRY_NODE`): jumps to the enclosing rescue clause's start.
+fn gen_retry<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let pc0 = cg
+        .current()
+        .1
+        .loops
+        .iter()
+        .rev()
+        .find(|frame| frame.kind == LoopType::Rescue)
+        .map(|frame| frame.pc0);
+    let Some(pc0) = pc0 else {
+        return Err(unsupported(&node, "retry outside rescue"));
+    };
+    cg.current().1.genjmp(opcode::OP_JMPUW, pc0)?;
     if val {
         cg.current().1.push_n(1)?;
     }

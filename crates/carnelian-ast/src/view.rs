@@ -125,6 +125,74 @@ pub struct ProgramView<N> {
     pub body: N,
 }
 
+/// `begin` parts. `statements` distinguishes a null body (`None`) from an
+/// empty statements node (`Some` with an empty vector); the two emit
+/// different bytes (`gen_begin`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeginView<N> {
+    /// Body statements.
+    pub statements: Option<Vec<N>>,
+    /// First `rescue` clause.
+    pub rescue_clause: Option<N>,
+    /// `else` clause.
+    pub else_clause: Option<N>,
+    /// `ensure` clause.
+    pub ensure_clause: Option<N>,
+}
+
+/// One `rescue` clause (`RescueNode`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RescueView<N> {
+    /// Exception classes (`SplatNode` allowed).
+    pub exceptions: Vec<N>,
+    /// `=> e` target (`None` when absent).
+    pub reference: Option<N>,
+    /// Clause body (`None` for a null subtree).
+    pub statements: Option<Vec<N>>,
+    /// Next `rescue` clause.
+    pub subsequent: Option<N>,
+}
+
+/// `expr rescue expr` (`RescueModifierNode`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RescueModifierView<N> {
+    /// Protected expression.
+    pub expression: N,
+    /// Fallback expression.
+    pub rescue_expression: N,
+}
+
+/// `ensure` clause (`EnsureNode`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnsureView<N> {
+    /// Ensure body (`None` for a null subtree).
+    pub statements: Option<Vec<N>>,
+}
+
+/// Multiple assignment (`MultiWriteNode`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultiWriteView<N> {
+    /// Targets before the splat.
+    pub lefts: Vec<N>,
+    /// Rest target (`SplatNode` or `ImplicitRestNode`).
+    pub rest: Option<N>,
+    /// Targets after the splat.
+    pub rights: Vec<N>,
+    /// Right-hand side.
+    pub value: N,
+}
+
+/// Multiple assignment target (`MultiTargetNode`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultiTargetView<N> {
+    /// Targets before the splat.
+    pub lefts: Vec<N>,
+    /// Rest target (`SplatNode` or `ImplicitRestNode`).
+    pub rest: Option<N>,
+    /// Targets after the splat.
+    pub rights: Vec<N>,
+}
+
 /// Block or lambda parts (`BlockNode`, `LambdaNode` share the layout).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockView<N> {
@@ -542,5 +610,45 @@ pub trait BackendNode: AstNode + Sized {
     /// carries an explicit block (gated), `None` is plain pass-through.
     fn forwarding_super(&self) -> Option<Option<Self>> {
         None
+    }
+
+    /// Local variable target (`LocalVariableTargetNode`).
+    fn lvar_target(&self) -> Option<LvarRef> {
+        None
+    }
+
+    /// `begin` parts (`BeginNode`).
+    fn begin_view(&self) -> Option<BeginView<Self>> {
+        None
+    }
+
+    /// One `rescue` clause (`RescueNode`).
+    fn rescue_view(&self) -> Option<RescueView<Self>> {
+        None
+    }
+
+    /// `expr rescue expr` (`RescueModifierNode`).
+    fn rescue_modifier_view(&self) -> Option<RescueModifierView<Self>> {
+        None
+    }
+
+    /// `ensure` clause (`EnsureNode`).
+    fn ensure_view(&self) -> Option<EnsureView<Self>> {
+        None
+    }
+
+    /// Multiple assignment (`MultiWriteNode`).
+    fn multi_write_view(&self) -> Option<MultiWriteView<Self>> {
+        None
+    }
+
+    /// Multiple assignment target (`MultiTargetNode`).
+    fn multi_target_view(&self) -> Option<MultiTargetView<Self>> {
+        None
+    }
+
+    /// Whether an arguments node carries `...` forwarding.
+    fn args_forwarding(&self) -> bool {
+        false
     }
 }

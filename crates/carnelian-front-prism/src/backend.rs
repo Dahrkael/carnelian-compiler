@@ -1,10 +1,11 @@
 //! `BackendNode` for borrowed nodes (thin access, no tree copies).
 
 use carnelian_ast::view::{
-    BackendNode, BlockParamView, BlockView, CallView, CaseView, ClassView, ConstPathRead,
-    ConstPathWrite, DefView, IfView, IntegerLit, LambdaView, LvarRef, LvarWrite, ModuleView,
-    ParamsView, ProgramView, SclassView, SimpleLit, SuperView, VarWrite, WhenView, WhileView,
-    YieldView,
+    BackendNode, BeginView, BlockParamView, BlockView, CallView, CaseView, ClassView,
+    ConstPathRead, ConstPathWrite, DefView, EnsureView, IfView, IntegerLit, LambdaView, LvarRef,
+    LvarWrite, ModuleView, MultiTargetView, MultiWriteView, ParamsView, ProgramView,
+    RescueModifierView, RescueView, SclassView, SimpleLit, SuperView, VarWrite, WhenView,
+    WhileView, YieldView,
 };
 use carnelian_ast::AstNode;
 
@@ -105,20 +106,13 @@ impl BackendNode for PrismNode<'_> {
 
     fn call_args(&self) -> Option<Vec<Self>> {
         let node = self.inner.as_arguments_node()?;
-        let mut out = Vec::new();
-        for argument in node.arguments().iter() {
-            let child = wrap(argument);
-            // Forms with dedicated emission paths (splat flush, keyword
-            // hashes, forwarding) are gated to their tranches.
-            if matches!(
-                child.kind_name(),
-                "SplatNode" | "KeywordHashNode" | "ForwardingArgumentsNode"
-            ) {
-                return None;
-            }
-            out.push(child);
-        }
-        Some(out)
+        Some(node.arguments().iter().map(wrap).collect())
+    }
+
+    fn args_forwarding(&self) -> bool {
+        self.inner
+            .as_arguments_node()
+            .is_some_and(|node| node.is_contains_forwarding())
     }
 
     fn if_branch(&self) -> Option<IfView<Self>> {
@@ -145,15 +139,7 @@ impl BackendNode for PrismNode<'_> {
 
     fn array_elements(&self) -> Option<Vec<Self>> {
         let node = self.inner.as_array_node()?;
-        let mut out = Vec::new();
-        for element in node.elements().iter() {
-            let child = wrap(element);
-            if child.kind_name() == "SplatNode" {
-                return None;
-            }
-            out.push(child);
-        }
-        Some(out)
+        Some(node.elements().iter().map(wrap).collect())
     }
 
     fn while_loop(&self) -> Option<WhileView<Self>> {
@@ -592,5 +578,73 @@ impl BackendNode for PrismNode<'_> {
     fn forwarding_super(&self) -> Option<Option<Self>> {
         let node = self.inner.as_forwarding_super_node()?;
         Some(node.block().map(|block| wrap(block.as_node())))
+    }
+
+    fn lvar_target(&self) -> Option<LvarRef> {
+        let node = self.inner.as_local_variable_target_node()?;
+        Some(LvarRef {
+            name: const_bytes(node.name()),
+            depth: node.depth(),
+        })
+    }
+
+    fn begin_view(&self) -> Option<BeginView<Self>> {
+        let node = self.inner.as_begin_node()?;
+        Some(BeginView {
+            statements: node
+                .statements()
+                .map(|statements| wrap_many(statements.body())),
+            rescue_clause: node.rescue_clause().map(|clause| wrap(clause.as_node())),
+            else_clause: node.else_clause().map(|clause| wrap(clause.as_node())),
+            ensure_clause: node.ensure_clause().map(|clause| wrap(clause.as_node())),
+        })
+    }
+
+    fn rescue_view(&self) -> Option<RescueView<Self>> {
+        let node = self.inner.as_rescue_node()?;
+        Some(RescueView {
+            exceptions: wrap_many(node.exceptions()),
+            reference: node.reference().map(wrap),
+            statements: node
+                .statements()
+                .map(|statements| wrap_many(statements.body())),
+            subsequent: node.subsequent().map(|clause| wrap(clause.as_node())),
+        })
+    }
+
+    fn rescue_modifier_view(&self) -> Option<RescueModifierView<Self>> {
+        let node = self.inner.as_rescue_modifier_node()?;
+        Some(RescueModifierView {
+            expression: wrap(node.expression()),
+            rescue_expression: wrap(node.rescue_expression()),
+        })
+    }
+
+    fn ensure_view(&self) -> Option<EnsureView<Self>> {
+        let node = self.inner.as_ensure_node()?;
+        Some(EnsureView {
+            statements: node
+                .statements()
+                .map(|statements| wrap_many(statements.body())),
+        })
+    }
+
+    fn multi_write_view(&self) -> Option<MultiWriteView<Self>> {
+        let node = self.inner.as_multi_write_node()?;
+        Some(MultiWriteView {
+            lefts: wrap_many(node.lefts()),
+            rest: node.rest().map(wrap),
+            rights: wrap_many(node.rights()),
+            value: wrap(node.value()),
+        })
+    }
+
+    fn multi_target_view(&self) -> Option<MultiTargetView<Self>> {
+        let node = self.inner.as_multi_target_node()?;
+        Some(MultiTargetView {
+            lefts: wrap_many(node.lefts()),
+            rest: node.rest().map(wrap),
+            rights: wrap_many(node.rights()),
+        })
     }
 }

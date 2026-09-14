@@ -205,3 +205,111 @@ fn variable_and_super_accessors_cover_plain_forms() {
     assert_eq!(path.name, b"Bar");
     assert!(path.parent.is_some());
 }
+
+#[test]
+fn begin_accessors_cover_rescue_else_ensure() {
+    let parsed = parse(b"begin\n  1\nrescue TypeError => e\n  2\nelse\n  3\nensure\n  4\nend\n");
+    let node = first_statement(&parsed);
+    assert_eq!(node.kind_name(), "BeginNode");
+    let view = node.begin_view().expect("begin");
+    assert_eq!(view.statements.as_ref().map(Vec::len), Some(1));
+    assert!(view.else_clause.is_some());
+    assert!(view.ensure_clause.is_some());
+
+    let rescue = view.rescue_clause.expect("rescue clause");
+    let clause = rescue.rescue_view().expect("rescue view");
+    assert_eq!(clause.exceptions.len(), 1);
+    assert_eq!(clause.exceptions[0].kind_name(), "ConstantReadNode");
+    assert!(clause.reference.is_some());
+    assert_eq!(clause.statements.as_ref().map(Vec::len), Some(1));
+    assert!(clause.subsequent.is_none());
+
+    let ensure = view.ensure_clause.expect("ensure clause");
+    assert_eq!(
+        ensure
+            .ensure_view()
+            .expect("ensure view")
+            .statements
+            .map(|s| s.len()),
+        Some(1)
+    );
+}
+
+#[test]
+fn begin_accessors_distinguish_bare_and_typed() {
+    let parsed = parse(b"begin\n  1\nend\n");
+    let node = first_statement(&parsed);
+    let view = node.begin_view().expect("begin");
+    assert!(view.rescue_clause.is_none());
+    assert!(view.else_clause.is_none());
+    assert!(view.ensure_clause.is_none());
+    assert_eq!(view.statements.map(|s| s.len()), Some(1));
+}
+
+#[test]
+fn rescue_modifier_exposes_both_expressions() {
+    let parsed = parse(b"1 rescue 2\n");
+    let node = first_statement(&parsed);
+    assert_eq!(node.kind_name(), "RescueModifierNode");
+    let view = node.rescue_modifier_view().expect("modifier");
+    assert_eq!(view.expression.kind_name(), "IntegerNode");
+    assert_eq!(view.rescue_expression.kind_name(), "IntegerNode");
+}
+
+#[test]
+fn multi_write_accessors_cover_targets_and_rest() {
+    let parsed = parse(b"a, *b, c = [1, 2, 3]\n");
+    let node = first_statement(&parsed);
+    assert_eq!(node.kind_name(), "MultiWriteNode");
+    let view = node.multi_write_view().expect("multi write");
+    assert_eq!(view.lefts.len(), 1);
+    assert_eq!(view.lefts[0].kind_name(), "LocalVariableTargetNode");
+    assert!(view.lefts[0].lvar_target().is_some());
+    let rest = view.rest.expect("rest");
+    assert_eq!(rest.kind_name(), "SplatNode");
+    assert!(rest.splat_value().expect("splat").is_some());
+    assert_eq!(view.rights.len(), 1);
+    assert_eq!(view.value.kind_name(), "ArrayNode");
+}
+
+#[test]
+fn multi_write_accessors_cover_nested_target_and_implicit_rest() {
+    let parsed = parse(b"(a, b), c = [1, 2], 3\n");
+    let node = first_statement(&parsed);
+    let view = node.multi_write_view().expect("multi write");
+    assert_eq!(view.lefts.len(), 2);
+    assert_eq!(view.lefts[0].kind_name(), "MultiTargetNode");
+    assert_eq!(view.lefts[1].kind_name(), "LocalVariableTargetNode");
+    let inner = view.lefts[0].multi_target_view().expect("multi target");
+    assert_eq!(inner.lefts.len(), 2);
+    assert!(inner.rest.is_none());
+    assert!(view.rights.is_empty());
+
+    let parsed = parse(b"a, = [1, 2]\n");
+    let node = first_statement(&parsed);
+    let view = node.multi_write_view().expect("multi write");
+    assert_eq!(view.rest.expect("rest").kind_name(), "ImplicitRestNode");
+}
+
+#[test]
+fn call_args_include_splats_and_keywords() {
+    let parsed = parse(b"f(*a, b: 1)\n");
+    let node = first_statement(&parsed);
+    let call = node.call().expect("call");
+    let args = call.args.expect("args");
+    let items = args.call_args().expect("items");
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].kind_name(), "SplatNode");
+    assert_eq!(items[1].kind_name(), "KeywordHashNode");
+    assert!(!args.args_forwarding());
+}
+
+#[test]
+fn array_elements_include_splats() {
+    let parsed = parse(b"[1, *a]\n");
+    let node = first_statement(&parsed);
+    assert_eq!(node.kind_name(), "ArrayNode");
+    let elements = node.array_elements().expect("elements");
+    assert_eq!(elements.len(), 2);
+    assert_eq!(elements[1].kind_name(), "SplatNode");
+}

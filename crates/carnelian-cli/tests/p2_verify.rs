@@ -1,8 +1,8 @@
 //! P2 certification (literals tranche): `verify` compares
 //! `compile --frontend prism` against the pinned C golden, byte for byte, in
-//! both strip modes. Exit `0` required. Keyword hashes in call arguments,
-//! pattern matching and interpolated symbols belong to later tranches and are
-//! locked as diagnostics below, never as diverging bytes.
+//! both strip modes. Exit `0` required. Pattern matching and interpolated
+//! symbols belong to later tranches and are locked as diagnostics below,
+//! never as diverging bytes. Keyword hashes in call arguments opened in P2.5.
 
 use std::process::Command;
 
@@ -69,7 +69,6 @@ const SNIPPETS: &[(&str, &str)] = &[
 /// Later-tranche syntax: compilation must fail with a diagnostic, and must
 /// never emit bytes that diverge from the reference.
 const GATED: &[(&str, &str, &str)] = &[
-    ("kwargs_gated", "puts(a: 1)\n", "complex arguments"),
     (
         "case_match_gated",
         "x = 1\ncase x\nin 1 then puts 1\nend\n",
