@@ -120,7 +120,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.flags.len()
     ));
 
-    // Flag constants per group.
+    // Flag constants per group. Node-specific flags share the `u16` word
+    // with the generic `NEWLINE` (bit 0) and `STATIC_LITERAL` (bit 1), so
+    // group bit `n` is word bit `n + 2` (`pm_node_flags_t` in Prism).
     for group in &config.flags {
         out.push_str(&format!(
             "\n/// Flag bits for `{}` (Prism `u16` flags, 1:1 names).\n",
@@ -131,7 +133,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             out.push_str(&format!("    /// Prism flag `{}`.\n", value.name));
             out.push_str(&format!(
                 "    pub const {}: u16 = 1 << {};\n",
-                value.name, bit
+                value.name,
+                bit + 2
             ));
         }
         out.push_str("}\n");

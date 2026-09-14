@@ -34,6 +34,8 @@ pub enum Integer {
 
 impl Integer {
     /// Build from raw decimal bytes, mirroring `new_lit_int` range checks.
+    /// Reserved for text-source frontends (P4 MRI); the Prism lowering
+    /// normalizes to canonical digits itself instead of using this.
     #[must_use]
     pub fn from_decimal(raw: &[u8]) -> Self {
         let text = core::str::from_utf8(raw).unwrap_or("");
