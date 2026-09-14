@@ -272,12 +272,15 @@ pub const SHAPES: [Shape; 119] = [
 ];
 
 /// Decoded instruction with `EXT` prefixes resolved.
+///
+/// `a` is 32 bits like C's `mrc_insn_data` (only `OP_ENTER` uses the top
+/// bits); `b`/`cc` stay 16 bits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Decoded {
     /// Real opcode (`EXT` consumed).
     pub insn: u8,
     /// First operand.
-    pub a: u16,
+    pub a: u32,
     /// Second operand.
     pub b: u16,
     /// Third operand.
@@ -328,7 +331,7 @@ fn read_s(iseq: &[u8], pc: &mut usize) -> Option<u16> {
     Some((hi << 8) | lo)
 }
 
-fn fetch(iseq: &[u8], pc: &mut usize, insn: u8, ext: u8) -> Option<(u16, u16, u16)> {
+fn fetch(iseq: &[u8], pc: &mut usize, insn: u8, ext: u8) -> Option<(u32, u16, u16)> {
     let (mut a, mut b, mut cc) = (0, 0, 0);
     // Widened operand positions per EXT level, mirroring FETCH_* macros.
     let wide_a = ext == 1 || ext == 3;
@@ -338,16 +341,16 @@ fn fetch(iseq: &[u8], pc: &mut usize, insn: u8, ext: u8) -> Option<(u16, u16, u1
         Shape::B => {
             // NB: FETCH_B_3 is narrow in C despite the EXT3 prefix.
             a = if wide_a && ext != 3 {
-                read_s(iseq, pc)?
+                u32::from(read_s(iseq, pc)?)
             } else {
-                u16::from(read_b(iseq, pc)?)
+                u32::from(read_b(iseq, pc)?)
             };
         }
         Shape::Bb => {
             a = if wide_a {
-                read_s(iseq, pc)?
+                u32::from(read_s(iseq, pc)?)
             } else {
-                u16::from(read_b(iseq, pc)?)
+                u32::from(read_b(iseq, pc)?)
             };
             b = if wide_b {
                 read_s(iseq, pc)?
@@ -357,9 +360,9 @@ fn fetch(iseq: &[u8], pc: &mut usize, insn: u8, ext: u8) -> Option<(u16, u16, u1
         }
         Shape::Bbb => {
             a = if wide_a {
-                read_s(iseq, pc)?
+                u32::from(read_s(iseq, pc)?)
             } else {
-                u16::from(read_b(iseq, pc)?)
+                u32::from(read_b(iseq, pc)?)
             };
             b = if wide_b {
                 read_s(iseq, pc)?
@@ -370,29 +373,29 @@ fn fetch(iseq: &[u8], pc: &mut usize, insn: u8, ext: u8) -> Option<(u16, u16, u1
         }
         Shape::Bs => {
             a = if wide_a {
-                read_s(iseq, pc)?
+                u32::from(read_s(iseq, pc)?)
             } else {
-                u16::from(read_b(iseq, pc)?)
+                u32::from(read_b(iseq, pc)?)
             };
             b = read_s(iseq, pc)?;
         }
         Shape::Bss => {
             a = if wide_a {
-                read_s(iseq, pc)?
+                u32::from(read_s(iseq, pc)?)
             } else {
-                u16::from(read_b(iseq, pc)?)
+                u32::from(read_b(iseq, pc)?)
             };
             b = read_s(iseq, pc)?;
             cc = read_s(iseq, pc)?;
         }
         Shape::S => {
-            a = read_s(iseq, pc)?;
+            a = u32::from(read_s(iseq, pc)?);
         }
         Shape::W => {
             let b1 = u32::from(read_b(iseq, pc)?);
             let b2 = u32::from(read_b(iseq, pc)?);
             let b3 = u32::from(read_b(iseq, pc)?);
-            a = ((b1 << 16) | (b2 << 8) | b3) as u16;
+            a = (b1 << 16) | (b2 << 8) | b3;
         }
     }
     Some((a, b, cc))

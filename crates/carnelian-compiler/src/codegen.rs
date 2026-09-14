@@ -85,6 +85,8 @@ pub struct Scope {
     pub pool: Vec<CgPool>,
     /// Interned symbols referenced by this scope.
     pub syms: Vec<SymbolId>,
+    /// Symbol capacity doubler (`scapa`, starts at 256).
+    pub scapa: usize,
     /// Finished child ireps.
     pub reps: Vec<Irep>,
     /// Catch handlers under construction.
@@ -153,6 +155,7 @@ impl Scope {
             iseq: Vec::new(),
             pool: Vec::new(),
             syms: Vec::new(),
+            scapa: 256,
             reps: Vec::new(),
             catch_table: Vec::new(),
             loops: Vec::new(),
@@ -186,6 +189,7 @@ impl Scope {
             iseq: Vec::with_capacity(1024),
             pool: Vec::with_capacity(32),
             syms: Vec::with_capacity(256),
+            scapa: 256,
             reps: Vec::with_capacity(8),
             catch_table: Vec::new(),
             loops: Vec::new(),
@@ -469,7 +473,7 @@ impl Scope {
         &mut self,
         session: &Session,
         op: u8,
-        a: u16,
+        mut a: u16,
         pc: u32,
         val: bool,
     ) -> Result<u32, Diagnostic> {
@@ -477,13 +481,15 @@ impl Scope {
             let data = self.last_insn();
             match data.insn {
                 opcode::OP_MOVE => {
-                    if data.a == a && data.a > self.nlocals {
+                    if data.a == u32::from(a) && data.a > u32::from(self.nlocals) {
+                        // Single rewrite (`rewind_pc; a = data.b`), then plain
+                        // emission below like C (no recursion into peephole).
                         self.pc = self.lastpc;
-                        return self.genjmp2(session, op, data.b, pc, val);
+                        a = data.b;
                     }
                 }
                 opcode::OP_LOADNIL | opcode::OP_LOADFALSE
-                    if data.a == a || data.a > self.nlocals =>
+                    if data.a == u32::from(a) || data.a > u32::from(self.nlocals) =>
                 {
                     self.pc = self.lastpc;
                     if op == opcode::OP_JMPNOT
@@ -505,7 +511,7 @@ impl Scope {
                 | opcode::OP_LOADI_5
                 | opcode::OP_LOADI_6
                 | opcode::OP_LOADI_7
-                    if data.a == a || data.a > self.nlocals =>
+                    if data.a == u32::from(a) || data.a > u32::from(self.nlocals) =>
                 {
                     self.pc = self.lastpc;
                     if op == opcode::OP_JMPIF {
@@ -516,16 +522,15 @@ impl Scope {
                 _ => {}
             }
         }
-        // Plain emission. `lastpc` covers the whole jump: C sets it in
-        // `genop_0`, which runs after the manual `EXT1` byte here.
-        self.lastpc = self.pc;
+        // Plain emission. `lastpc` points at the opcode: C emits the manual
+        // `EXT1` byte first and `genop_0` stamps `lastpc` after it.
         if a > 0xff {
             self.check_no_ext_ops(session, a, 0)?;
             self.gen_b(opcode::OP_EXT1)?;
-            self.gen_b(op)?;
+            self.genop_0(op)?;
             self.gen_s(a)?;
         } else {
-            self.gen_b(op)?;
+            self.genop_0(op)?;
             self.gen_b(a as u8)?;
         }
         let pos = self.pc;
@@ -619,18 +624,18 @@ impl Scope {
             let data = self.last_insn();
             match data.insn {
                 opcode::OP_MOVE => {
-                    if data.a == src {
+                    if data.a == u32::from(src) {
                         if data.b == dst {
                             return Ok(());
                         }
-                        if data.a < self.nlocals {
+                        if data.a < u32::from(self.nlocals) {
                             return self.plain_move(session, dst, src);
                         }
                         self.pc = self.lastpc;
                         self.lastpc = self.prev_pc(self.pc);
                         return self.gen_move(session, dst, data.b, false);
                     }
-                    if dst == data.a {
+                    if u32::from(dst) == data.a {
                         self.pc = self.lastpc;
                         self.lastpc = self.prev_pc(self.pc);
                         return self.gen_move(session, dst, src, false);
@@ -649,7 +654,7 @@ impl Scope {
                 | opcode::OP_LOADI_5
                 | opcode::OP_LOADI_6
                 | opcode::OP_LOADI_7 => {
-                    if data.a == src && data.a >= self.nlocals {
+                    if data.a == u32::from(src) && data.a >= u32::from(self.nlocals) {
                         self.pc = self.lastpc;
                         return self.genop_1(session, data.insn, dst);
                     }
@@ -676,14 +681,14 @@ impl Scope {
                     return self.fused_move_2(session, dst, src, &data);
                 }
                 opcode::OP_LOADI16 => {
-                    if data.a != src || data.a < self.nlocals {
+                    if data.a != u32::from(src) || data.a < u32::from(self.nlocals) {
                         return self.plain_move(session, dst, src);
                     }
                     self.pc = self.lastpc;
                     return self.genop_2s(session, data.insn, dst, data.b);
                 }
                 opcode::OP_LOADI32 => {
-                    if data.a != src || data.a < self.nlocals {
+                    if data.a != u32::from(src) || data.a < u32::from(self.nlocals) {
                         return self.plain_move(session, dst, src);
                     }
                     let value = (u32::from(data.b) << 16) | u32::from(data.cc);
@@ -691,24 +696,36 @@ impl Scope {
                     return self.genop_2ss(session, data.insn, dst, value);
                 }
                 opcode::OP_ARRAY => {
-                    if data.a != src || data.a < self.nlocals || data.a < dst {
+                    if data.a != u32::from(src)
+                        || data.a < u32::from(self.nlocals)
+                        || data.a < u32::from(dst)
+                    {
                         return self.plain_move(session, dst, src);
                     }
                     self.pc = self.lastpc;
-                    if data.b == 0 || dst == data.a {
+                    if data.b == 0 || u32::from(dst) == data.a {
                         return self.genop_2(session, opcode::OP_ARRAY, dst, 0);
                     }
-                    return self.genop_3(session, opcode::OP_ARRAY2, dst, data.a, data.b as u8);
+                    return self.genop_3(
+                        session,
+                        opcode::OP_ARRAY2,
+                        dst,
+                        data.a as u16,
+                        data.b as u8,
+                    );
                 }
                 opcode::OP_ARRAY2 => {
-                    if data.a != src || data.a < self.nlocals || data.a < dst {
+                    if data.a != u32::from(src)
+                        || data.a < u32::from(self.nlocals)
+                        || data.a < u32::from(dst)
+                    {
                         return self.plain_move(session, dst, src);
                     }
                     self.pc = self.lastpc;
                     return self.genop_3(session, opcode::OP_ARRAY2, dst, data.b, data.cc as u8);
                 }
                 opcode::OP_AREF | opcode::OP_GETUPVAR => {
-                    if data.a != src || data.a < self.nlocals {
+                    if data.a != u32::from(src) || data.a < u32::from(self.nlocals) {
                         return self.plain_move(session, dst, src);
                     }
                     self.pc = self.lastpc;
@@ -716,9 +733,14 @@ impl Scope {
                 }
                 opcode::OP_ADDI | opcode::OP_SUBI => {
                     // ADDILV/SUBILV fusion needs the preceding MOVE; the
-                    // trailing `genop_2` in C is unreachable.
-                    // `data.addr` is `lastpc` (decoded by `last_insn`).
-                    if self.lastpc == self.lastlabel || data.a != src || data.a < self.nlocals {
+                    // trailing `genop_2` in C is unreachable. A zero `lastpc`
+                    // would make `prev_pc` read the first instruction where C
+                    // decodes `NULL`, so it takes the plain path too.
+                    if self.lastpc == 0
+                        || self.lastpc == self.lastlabel
+                        || data.a != u32::from(src)
+                        || data.a < u32::from(self.nlocals)
+                    {
                         return self.plain_move(session, dst, src);
                     }
                     let prev = self.prev_pc(self.lastpc);
@@ -734,7 +756,7 @@ impl Scope {
                     } else {
                         opcode::OP_SUBILV
                     };
-                    return self.genop_3(session, fused, dst, data.a, data.b as u8);
+                    return self.genop_3(session, fused, dst, data.a as u16, data.b as u8);
                 }
                 _ => {}
             }
@@ -754,7 +776,7 @@ impl Scope {
         data: &Decoded,
     ) -> Result<(), Diagnostic> {
         // `OP_HASH` with `b == 0` falls through to the same fusion in C.
-        if data.a != src || data.a < self.nlocals {
+        if data.a != u32::from(src) || data.a < u32::from(self.nlocals) {
             return self.plain_move(session, dst, src);
         }
         let (insn, operand) = (data.insn, data.b);
@@ -768,11 +790,11 @@ impl Scope {
             return self.genop_1(session, op, src);
         }
         let data = self.last_insn();
-        if data.insn == opcode::OP_MOVE && src == data.a {
+        if data.insn == opcode::OP_MOVE && u32::from(src) == data.a {
             self.pc = self.lastpc;
             return self.genop_1(session, op, data.b);
         }
-        if src == data.a && op == opcode::OP_RETURN {
+        if u32::from(src) == data.a && op == opcode::OP_RETURN {
             let fused = match data.insn {
                 opcode::OP_LOADSELF => Some(opcode::OP_RETSELF),
                 opcode::OP_LOADNIL => Some(opcode::OP_RETNIL),
@@ -892,7 +914,7 @@ impl Scope {
         Ok(index)
     }
 
-    /// Symbol interning (`new_sym`).
+    /// Symbol interning (`new_sym`, with the C doubling capacity).
     pub fn new_sym(&mut self, session: &mut Session, name: &[u8]) -> Result<u16, Diagnostic> {
         let id = session.symbols.intern(name);
         if let Some(index) = self.syms.iter().position(|known| *known == id) {
@@ -901,8 +923,13 @@ impl Scope {
         if name.len() >= 0xffff {
             return Err(error("symbol name too long"));
         }
-        if self.syms.len() >= 0xffff {
-            return Err(error("too many symbols"));
+        // `scapa` starts at 256 and doubles; past `0xffff` is an error, so at
+        // most 32768 symbols fit, like in C.
+        if self.syms.len() >= self.scapa {
+            self.scapa *= 2;
+            if self.scapa > 0xffff {
+                return Err(error("too many symbols"));
+            }
         }
         self.syms.push(id);
         Ok((self.syms.len() - 1) as u16)
