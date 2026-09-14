@@ -28,6 +28,14 @@ impl<'pr> PrismNode<'pr> {
     }
 }
 
+impl Clone for PrismNode<'_> {
+    /// Borrowed-view copy: every variant carries the same by-value parts,
+    /// so rebuilding from them copies the handle without touching the tree.
+    fn clone(&self) -> Self {
+        Self::new(clone_node(&self.inner))
+    }
+}
+
 /// Parser error mapped to offsets (converted to backend diagnostics upstream).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseDiagnostic {

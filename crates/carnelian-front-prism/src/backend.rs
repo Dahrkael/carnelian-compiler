@@ -606,10 +606,9 @@ impl BackendNode for PrismNode<'_> {
         let mut out = Vec::new();
         for argument in arguments.arguments().iter() {
             let child = wrap(argument);
-            if matches!(
-                child.kind_name(),
-                "SplatNode" | "KeywordHashNode" | "ForwardingArgumentsNode"
-            ) {
+            // `...` rides `gen_values` like a splat; other complex
+            // argument forms stay gated.
+            if matches!(child.kind_name(), "SplatNode" | "KeywordHashNode") {
                 return None;
             }
             out.push(child);

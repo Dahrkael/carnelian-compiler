@@ -365,9 +365,10 @@ pub struct CallTargetView<N> {
     pub name: Vec<u8>,
 }
 
-/// Explicit `super` call (`SuperNode` with plain positional arguments).
+/// Explicit `super` call (`SuperNode` with plain positional arguments,
+/// plus `...` forwarding which rides `gen_values`).
 /// `args` is `None` for `super()` and `Some` (possibly empty) otherwise;
-/// splat/keyword/forwarding forms and block arguments are gated.
+/// splat/keyword forms and block arguments are gated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuperView<N> {
     /// Plain positional arguments (`None` for empty `super()`).
@@ -375,7 +376,7 @@ pub struct SuperView<N> {
 }
 
 /// Handler-facing node access. See the module docs.
-pub trait BackendNode: AstNode + Sized {
+pub trait BackendNode: AstNode + Clone + Sized {
     /// Integer literal value.
     fn integer_lit(&self) -> Option<IntegerLit> {
         None
@@ -401,8 +402,9 @@ pub trait BackendNode: AstNode + Sized {
         None
     }
 
-    /// Positional call arguments of an arguments node. `None` when the node
-    /// is absent or carries splat/keyword/forwarding forms.
+    /// Call arguments of an arguments node, including splat and `...`
+    /// forwarding forms (`gen_values` handles them); `None` when the node
+    /// is absent. Keyword hashes ride along for the caller to split off.
     fn call_args(&self) -> Option<Vec<Self>> {
         None
     }

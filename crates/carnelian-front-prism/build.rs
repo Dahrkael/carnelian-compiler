@@ -50,6 +50,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ));
     }
     out.push_str("    }\n}\n");
+    out.push_str(
+        "pub fn clone_node<'pr>(node: &ruby_prism::Node<'pr>) -> ruby_prism::Node<'pr> {\n",
+    );
+    out.push_str("    match node {\n");
+    for node in &config.nodes {
+        out.push_str(&format!(
+            "        ruby_prism::Node::{n} {{ parser, pointer, marker }} => ruby_prism::Node::{n} {{ parser: *parser, pointer: *pointer, marker: *marker }},\n",
+            n = node.name
+        ));
+    }
+    out.push_str("    }\n}\n");
     std::fs::write(&dest, out)?;
     Ok(())
 }

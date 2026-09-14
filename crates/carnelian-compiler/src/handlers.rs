@@ -19,6 +19,9 @@ const LIT_ARY_MAX: usize = 64;
 const VAL_STACK_MAX: u32 = 99;
 /// `CALL_MAXARGS`: argument count marking an array-gathered list (`gen_call`).
 const CALL_MAXARGS: i32 = 15;
+/// Forwarded-argument operand (`gen_call` with `...` carries `0xFF`, not a
+/// nibble-packed count).
+const FORWARD_ARGS: i32 = 0xFF;
 /// Catch handler kinds (`enum mrc_catch_type`).
 const CATCH_RESCUE: u8 = 0;
 const CATCH_ENSURE: u8 = 1;
@@ -1268,13 +1271,89 @@ fn append_destructured_parts<N: BackendNode>(
             return Err(unsupported(site, "method parameters"));
         };
         for part in &view.lefts {
-            let Some(name) = part.required_param_name() else {
+            if let Some(name) = part.required_param_name() {
+                lv.push(name);
+            } else if part.kind_name() == "MultiTargetNode" {
+                // A nested target misreads its `lefts.size` as a pool id
+                // (unchecked C cast); small sizes land on presymbols.
+                let Some(nested) = part.multi_target_view() else {
+                    return Err(unsupported(site, "method parameters"));
+                };
+                let Some(bytes) = presym_bytes(nested.lefts.len()) else {
+                    return Err(unsupported(site, "method parameters"));
+                };
+                lv.push(bytes.to_vec());
+            } else {
                 return Err(unsupported(site, "method parameters"));
-            };
-            lv.push(name);
+            }
         }
     }
     Ok(())
+}
+
+/// Pinned presymbol bytes by pool id (`mrc_presym.inc` of
+/// `mruby-compiler2 0.5.0`, inserted first into a fresh pool).
+fn presym_bytes(id: usize) -> Option<&'static [u8]> {
+    Some(match id {
+        1 => b"[]",
+        2 => b"<<",
+        3 => b">>",
+        4 => b"%",
+        5 => b"&",
+        6 => b"|",
+        7 => b"^",
+        8 => b"~",
+        9 => b"**",
+        10 => b"+",
+        11 => b"-",
+        12 => b"*",
+        13 => b"/",
+        14 => b"<",
+        15 => b"<=",
+        16 => b">",
+        17 => b">=",
+        18 => b"==",
+        19 => b"[]=",
+        20 => b"===",
+        21 => b"`",
+        22 => b"each",
+        23 => b"__case_eqq",
+        24 => b"StandardError",
+        25 => b"call",
+        26 => b"Kernel",
+        27 => b"Regexp",
+        28 => b"compile",
+        29 => b"__ENCODING__",
+        30 => b"nil?",
+        31 => b"$+",
+        32 => b"defined?",
+        33 => b"deconstruct",
+        34 => b"deconstruct_keys",
+        35 => b"size",
+        36 => b"has_key?",
+        37 => b"__pat_values",
+        38 => b"__except",
+        39 => b"dup",
+        40 => b"__defined_const?",
+        41 => b"__defined_method?",
+        42 => b"__defined_ivar?",
+        43 => b"__defined_yield?",
+        44 => b"__defined_gvar?",
+        45 => b"__defined_cvar?",
+        46 => b"__defined_super?",
+        47 => b"__defined_const_path?",
+        48 => b"__defined_method_on?",
+        49 => b"$~",
+        50 => b"__pre_match",
+        51 => b"__post_match",
+        52 => b"__last_group",
+        53 => b"__group",
+        54 => b"$!",
+        55 => b"freeze",
+        56 => b"respond_to?",
+        57 => b"Exception",
+        _ => return None,
+    })
 }
 
 /// Optional-default jump table (`lambda_body`: `pos` chain over the
@@ -2505,11 +2584,11 @@ fn gen_defined_recv<N: BackendNode>(
     if a.recv.is_none() {
         if a.literal.is_some() {
             gen_defined_parts(cg, &value, nil_jmps)?;
+        } else if a.unless_nil.is_some() {
+            // The check and the receiver value both evaluate the operand
+            // (`gen_defined_part` plus `codegen`, like C).
+            gen_defined_part(cg, value.clone(), nil_jmps)?;
         } else {
-            if a.unless_nil.is_some() {
-                cg.current().1.rlev = rlev;
-                return Err(defined_gate(&value, "back-reference operand"));
-            }
             // `gen_defined_part` finishes its own chain through
             // `codegen_defined`; only its JMPNOT joins the caller's chain.
             let mut local = JMPLINK_START;
@@ -2688,7 +2767,32 @@ fn gen_values<N: BackendNode>(
             scope.genop_1(session, opcode::OP_ARYCAT, dst)?;
             cg.current().1.push_n(1)?;
         } else if is_forwarding {
-            return Err(unsupported(&item, "forwarding arguments"));
+            // `...`: the flushed array gathers `*`, a fresh hash gathers
+            // `**`, and `&` rides along (`gen_values_upto` forwarding arm).
+            gen_forward_arg(cg, b"*", val)?;
+            cg.current().1.pop_n(1)?;
+            {
+                let (session, scope) = cg.current();
+                let dst = scope.cursp();
+                scope.genop_1(session, opcode::OP_ARYCAT, dst)?;
+            }
+            cg.current().1.push_n(1)?;
+            {
+                let (session, scope) = cg.current();
+                let dst = scope.cursp();
+                scope.genop_2(session, opcode::OP_HASH, dst, 0)?;
+            }
+            cg.current().1.push_n(1)?;
+            gen_forward_arg(cg, b"**", val)?;
+            cg.current().1.pop_n(1)?;
+            {
+                let (session, scope) = cg.current();
+                let dst = scope.cursp();
+                scope.genop_1(session, opcode::OP_HASHCAT, dst)?;
+            }
+            cg.current().1.push_n(1)?;
+            gen_forward_arg(cg, b"&", val)?;
+            break;
         } else {
             codegen(cg, item, val)?;
             n += 1;
@@ -2712,6 +2816,23 @@ fn gen_values<N: BackendNode>(
         return Ok(-1);
     }
     Ok(n)
+}
+
+/// Anonymous forwarding variable load (`gen_forward_arg`): a method-scope
+/// local when present, otherwise an upvar (forwarding from inside a block).
+fn gen_forward_arg(cg: &mut Codegen, name: &[u8], val: bool) -> Result<(), Diagnostic> {
+    let slot = cg.current().1.lv_idx(name);
+    if slot > 0 {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.gen_move(session, dst, slot, val)?;
+    } else {
+        let (slot, level) = cg.search_upvar(name)?;
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.gen_getupvar(session, dst, slot, level)?;
+    }
+    Ok(())
 }
 
 /// Local variable load into the cursor (`gen_lvar`).
@@ -2936,10 +3057,11 @@ fn gen_call_impl<N: BackendNode>(
     }
     let mut nargs: i32 = 0;
     let mut nk: i32 = 0;
+    let mut forwarding = false;
     if let Some(args) = view.args {
-        if args.args_forwarding() {
-            return Err(unsupported(&node, "forwarding arguments"));
-        }
+        // `...` rides `gen_values` like a splat, then forces the block
+        // call shape with a full `0xFF` operand (`gen_call` tail).
+        forwarding = args.args_forwarding();
         let Some(mut items) = args.call_args() else {
             return Err(unsupported(&node, "complex arguments"));
         };
@@ -2992,6 +3114,10 @@ fn gen_call_impl<N: BackendNode>(
         cg.current().1.pop_n(1)?;
         noop = true;
         blk = true;
+    }
+    if forwarding {
+        blk = true;
+        nargs = FORWARD_ARGS;
     }
     {
         let (_, scope) = cg.current();
@@ -3074,7 +3200,11 @@ fn send_call(
         let (session, scope) = cg.current();
         scope.new_sym(session, name)?
     };
-    let packed = ((nargs as u8) & 0x0f) | (((nk as u8) & 0x0f) << 4);
+    let packed = if nargs == FORWARD_ARGS {
+        FORWARD_ARGS as u8
+    } else {
+        ((nargs as u8) & 0x0f) | (((nk as u8) & 0x0f) << 4)
+    };
     if noself {
         let (session, scope) = cg.current();
         if !blk && nargs == 0 && nk == 0 {
