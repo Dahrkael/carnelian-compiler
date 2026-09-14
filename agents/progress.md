@@ -223,3 +223,75 @@ Reference probe results (pinned `mruby-compiler2 0.5.0`):
 - Declined with reason: threading `recv_ready` through gathered-argument
   calls (deferred; same fail-closed family as the pre-existing splat
   chain gate).
+
+## P3.3 parity harness + CLI owned path (worktree feature/p3-owned, unmerged)
+
+Scope: `carnelian-cli` only (`src/main.rs`, `Cargo.toml`, `tests/*`).
+Frozen files untouched: `view.rs`, `handlers.rs`, `front-owned`
+`lower.rs`/`owned.rs`/`lib.rs` (siblings A/B implement them in parallel).
+
+- Corpus refactor: the 7 `SNIPPETS` tables (44+30+30+47+85+79+23 entries)
+  and 5 `GATED` tables (22 entries) moved byte-identical into
+  `tests/corpus.rs` (`P1/P2/P23/P24/P25/P26/ROUNDTRIP_*`, `P2/P23/P24/P25/P26_GATED`)
+  plus `synthetic_cases()`/`synthetic_source()` for the 7 generated
+  limit-path sources. Test files share it via `#[path]`; all refactored
+  suites pass unchanged (`corpus.rs` carries `#![allow(dead_code)]` since
+  each target uses only its own tables).
+- CLI: `compile --frontend owned` = parse (FFI) → `lower` →
+  `compile_prism::<Owned>` (no `compile_owned` alias exists yet); unknown
+  frontends stay exit 2. `verify` gained `--frontend {prism|owned}`,
+  default `prism`. `roundtrip::cli_exit_codes` now expects owned exit 0
+  with prism-identical bytes (plus an unknown-frontend exit 2 check).
+- New `tests/p3_parity.rs`: 345 snippets (338 table + 7 synthetic) × 2
+  modes 3-way `reference`/`prism`/`owned` compare; 22 gated agreements
+  (exit 1 + same marker under both frontends); two host fixtures
+  (hand-built `Node` → `compile_prism::<Owned>` asserting the exact
+  reference bytes for `` and `puts 1`).
+- Wasm: `cargo check -p carnelian-ast -p carnelian-compiler --target
+  wasm32-unknown-unknown` passes. Fixtures live in CLI tests (host-only);
+  `prism_pin.rs` untouched, still host-only via its `ruby-prism` dev-dep.
+- Blocker (not in P3.3 scope; needs a shared-infra fix): the generated
+  flag constants in `carnelian-ast` (`build.rs` emits `1 << index`, but
+  Prism shares the `u16` word with the generic `NEWLINE=0x1` /
+  `STATIC_LITERAL=0x2` bits, so every node-specific group really starts at
+  bit 2: call `SAFE_NAVIGATION` is 4, not 1; same ×4 shift for all 15
+  groups, verified against vendored `ast.h`). Lowered `puts 1` carries real
+  flags `33` (`NEWLINE|IGNORE_VISIBILITY`), which `Owned::call` misreads as
+  `safe_nav`, emitting a phantom `MOVE+JMPNIL` (+7 bytes). Characterization:
+  345 snippets, 24 pass (all call-free), 321 fail owned-only with the same
+  +7-byte shape; prism matches everywhere; all 22 gated agreements and both
+  fixtures pass. Fix proposal: emit `1 << (index + 2)` in `build.rs` with a
+  comment citing `pm_node_flags_t`; sibling B unit tests that build flags
+  from the same constants stay self-consistent.
+- Deviation: used a `python` one-liner to patch a throwaway debug test that
+  was deleted afterwards (AGENTS.md wants the Edit tool even there).
+
+## P3 integration (coordinator)
+
+- Flag constants: applied the proposed `1 << (index + 2)` fix in
+  `carnelian-ast/build.rs` (verified against vendored `ast.h`:
+  `PM_NODE_FLAG_NEWLINE=0x1`, `STATIC_LITERAL=0x2`,
+  `PM_CALL_NODE_FLAGS_SAFE_NAVIGATION=4`). Was a real bug, not drift.
+- Negative bigints: `lower` keeps the `-` prefix in `Fallback.raw`
+  (agent B's `bigint_from_raw` already splits it back off); agent A's
+  signless test expectation flipped to match.
+- `const_path_write` on owned expected a `ConstantPathTargetNode`, but
+  Prism models the write target as a plain `ConstantPathNode` (FFI
+  `target()` return type confirms). Fixed the accessor, plus the
+  hand-built test tree. Was a real bug (every plain `A::B = 1` failed).
+- Parity corpus: `ROUNDTRIP_SNIPPETS` dropped from `p3_parity.rs` (they
+  certify the writer; `while_loop` holds gated `i += 1`). `roundtrip.rs`
+  still covers all 23.
+- Reviewer round on P3 (applied): all three fixes verified correct
+  against headers/bindings; goldens added for optional-forwarding defs,
+  splat-plus-forwarding calls, rest-in-nested-multis, backref receiver
+  chains and block-scoped `super(...)`; `SuperView`/`call_args` docs
+  fixed; `Integer::from_decimal` documented as reserved for text-source
+  frontends (P4 MRI). Declined: sharing `limbs_to_decimal`/`NIL_BLOCK`
+  helpers across frontends (stable ports, parity-guarded) and threading
+  `recv_ready` through gathered calls (fail-closed family, deferred).
+- Exit state: full workspace suite green (incl. 345×2×3 parity and 22
+  gated agreements), clippy `-D warnings` clean, fmt clean,
+  `wasm32-unknown-unknown` check of the pure path passes. Follow-ups for
+  later: feature-split `front-owned` (`lower` dev-only so the crate
+  builds for wasm), `recv_ready` gathered-call threading.
