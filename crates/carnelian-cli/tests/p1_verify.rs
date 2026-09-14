@@ -14,6 +14,21 @@ const SNIPPETS: &[(&str, &str)] = &[
     ("int64", "x = 3000000000\nputs x\n"),
     ("bigint", "puts 99999999999999999999999\n"),
     ("neg_bigint", "puts -99999999999999999999999\n"),
+    ("bigint_hex", "puts 0xFFFFFFFFFFFFFFFFFF\n"),
+    ("bigint_oct", "puts 0o7777777777777777777777\n"),
+    (
+        "bigint_bin",
+        "puts 0b1111111111111111111111111111111111111111111111111111111111111111111111111\n",
+    ),
+    (
+        "bigint_huge_hex",
+        "puts 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\n",
+    ),
+    ("neg_bigint_hex", "puts -0xFFFFFFFFFFFFFFFFFF\n"),
+    (
+        "bigint_hex_underscores",
+        "puts 0xFF_FF_FF_FF_FF_FF_FF_FF_FF\n",
+    ),
     ("float", "puts 1.5\n"),
     ("neg_float", "puts -2.5\n"),
     ("neg_zero_float", "puts -0.0\n"),

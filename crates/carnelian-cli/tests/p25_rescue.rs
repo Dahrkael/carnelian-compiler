@@ -128,20 +128,41 @@ const SNIPPETS: &[(&str, &str)] = &[
         "masgn_mixed_splat_rhs",
         "c = [2, 3]\na, b = 1, *c\nputs a\n",
     ),
+    ("masgn_index_target", "a = [0]\na[0], b = 1, 2\nputs a[0]\n"),
+    (
+        "masgn_index_multi",
+        "h = {}\nh[1, 2], x = 3, 4\nputs x\n",
+    ),
+    (
+        "masgn_index_splat",
+        "a = [0]\na[*[0]], x = 1, 2\nputs x\n",
+    ),
+    ("masgn_ivar_target", "a, @b = 1, 2\nputs @b\n"),
+    ("masgn_ivar_rest", "a, *@b = 1, 2, 3\nputs @b[0]\n"),
+    ("masgn_cvar_target", "@@a, @@b = 1, 2\nputs @@a\n"),
+    ("masgn_gvar_target", "$a, $b = 1, 2\nputs $a\n"),
+    ("masgn_const_target", "X, Y = 1, 2\nputs X\n"),
+    (
+        "masgn_call_target",
+        "class Box25\n  attr_accessor :x, :y\nend\nb = Box25.new\nb.x, b.y = 1, 2\nputs b.x\n",
+    ),
+    (
+        "masgn_self_call_target",
+        "class Box25s\n  attr_accessor :x\n  def init\n    self.x, @y = 1, 2\n    puts @y\n  end\nend\nBox25s.new.init\n",
+    ),
+    (
+        "masgn_nested_ivar",
+        "(@a, @b), c = [1, 2], 3\nputs @a\nputs c\n",
+    ),
 ];
 
 /// Later-tranche syntax: compilation must fail with a diagnostic, and must
 /// never emit bytes that diverge from the reference.
 const GATED: &[(&str, &str, &str)] = &[
     (
-        "masgn_index_target_gated",
-        "a = [0]\na[0], b = 1, 2\n",
-        "IndexTargetNode",
-    ),
-    (
-        "masgn_ivar_target_gated",
-        "a, @b = 1, 2\n",
-        "InstanceVariableTargetNode",
+        "masgn_const_path_target_gated",
+        "class Foo25\nend\nFoo25::A, b = 1, 2\n",
+        "ConstantPathTargetNode",
     ),
     ("for_gated", "for i in [1] do\n  puts i\nend\n", "ForNode"),
     (

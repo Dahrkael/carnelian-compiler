@@ -1,8 +1,7 @@
 //! P2.3 certification (blocks, lambdas, yield): `verify` compares
 //! `compile --frontend prism` against the pinned C golden, byte for byte, in
-//! both strip modes. Exit `0` required. Destructured, optional, keyword and
-//! block parameters plus top-level `yield` stay gated as diagnostics, never
-//! as diverging bytes.
+//! both strip modes. Exit `0` required. Top-level `yield` stays gated as a
+//! diagnostic, never as diverging bytes.
 
 use std::process::Command;
 
@@ -29,6 +28,35 @@ const SNIPPETS: &[(&str, &str)] = &[
     ("numbered", "puts [1, 2].map { _1 + 1 }\n"),
     ("it_block", "puts [1, 2].map { it + 1 }\n"),
     ("semi_local", "[1].each { |x; y| y = x + 1\nputs y }\n"),
+    ("block_destructure", "[1].each { |(a, b)| puts a }\n"),
+    (
+        "block_destructure_rest",
+        "[1].each { |a, (b, c)| puts b }\n",
+    ),
+    ("block_optional", "[1].each { |x = 1| puts x }\n"),
+    ("block_post", "[1, 2, 3].each { |a, *b, c| puts c }\n"),
+    ("block_keyword", "[1].each { |x: 1| puts x }\n"),
+    ("block_param", "[1].each { |&b| puts b }\n"),
+    (
+        "block_mixed",
+        "[1].each { |a, b = 1, *c, d, e:, **f, &g| puts a }\n",
+    ),
+    (
+        "lambda_optional",
+        "f = ->(a, b = 1) { a + b }\nputs f.call(1)\n",
+    ),
+    (
+        "lambda_keyword",
+        "f = ->(a:, b: 2) { a + b }\nputs f.call(a: 1)\n",
+    ),
+    (
+        "lambda_rest_block",
+        "f = ->(*a, &b) { a }\nputs f.call(1)\n",
+    ),
+    (
+        "lambda_mixed",
+        "f = ->(a, *b, c, d: 1, &e) { puts a }\nf.call(1, 2, 3)\n",
+    ),
 ];
 
 /// Still-gated forms: compilation must fail with a diagnostic, and must
@@ -36,26 +64,6 @@ const SNIPPETS: &[(&str, &str)] = &[
 const GATED: &[(&str, &str, &str)] = &[
     ("yield_naked", "yield\n", "Invalid yield"),
     ("yield_args", "yield 1\n", "Invalid yield"),
-    (
-        "block_destructure_gated",
-        "[1].each { |(a, b)| puts a }\n",
-        "block destructuring",
-    ),
-    (
-        "block_optional_gated",
-        "[1].each { |x = 1| puts x }\n",
-        "block optional",
-    ),
-    (
-        "block_keyword_gated",
-        "[1].each { |x: 1| puts x }\n",
-        "block keyword",
-    ),
-    (
-        "block_param_gated",
-        "[1].each { |&b| puts b }\n",
-        "block block parameter",
-    ),
 ];
 
 fn carnelian() -> Command {

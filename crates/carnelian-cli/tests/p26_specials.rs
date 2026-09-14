@@ -87,22 +87,22 @@ const SNIPPETS: &[(&str, &str)] = &[
     ("defined_receiver_cvar", "puts defined?(@@x.foo)\n"),
     ("defined_receiver_chain", "puts defined?(Foo.bar.baz)\n"),
     ("defined_begin_rescue", "puts defined?(begin; 1; rescue; 2; end)\n"),
+    ("defined_backref", "puts defined?($&)\n"),
+    ("defined_numbered_ref", "puts defined?($1)\n"),
+    ("defined_match_rest", "puts defined?($~)\nputs defined?($+)\nputs defined?($`)\n"),
+    ("backref_match", "puts $&\n"),
+    ("backref_prematch", "puts $`\n"),
+    ("backref_postmatch", "puts $'\n"),
+    ("backref_last_group", "puts $+\n"),
+    ("backref_numbered", "puts $1\n"),
+    ("backref_match_var", "puts $~\n"),
+    ("backref_assign", "x = $&\nputs x\n"),
+    ("backref_large_number", "puts $99999999999\n"),
 ];
 
 /// Left-out syntax: compilation must fail with a diagnostic, and must never
 /// emit bytes that diverge from the reference.
 const GATED: &[(&str, &str, &str)] = &[
-    // `defined?` sub-cases whose back-reference reads are unported.
-    (
-        "defined_backref_gated",
-        "puts defined?($&)\n",
-        "BackReferenceReadNode",
-    ),
-    (
-        "defined_numbered_ref_gated",
-        "puts defined?($1)\n",
-        "NumberedReferenceReadNode",
-    ),
     (
         "defined_chain_splat_gated",
         "puts defined?(x.foo(*a).bar)\n",

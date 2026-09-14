@@ -1,8 +1,8 @@
 //! P2.4 certification (def/class tranche): `verify` compares
 //! `compile --frontend prism` against the pinned C golden, byte for byte, in
-//! both strip modes. Exit `0` required. Complex parameter forms, operator
-//! writes and match-reference reads belong to other tranches and are locked
-//! as diagnostics below, never as diverging bytes.
+//! both strip modes. Exit `0` required. Operator writes and match-reference
+//! reads belong to other tranches and are locked as diagnostics below, never
+//! as diverging bytes.
 
 use std::process::Command;
 
@@ -63,18 +63,48 @@ const SNIPPETS: &[(&str, &str)] = &[
         "super_empty",
         "class A\n  def foo\n    1\n  end\nend\nclass B < A\n  def foo\n    super()\n  end\nend\nputs B.new.foo\n",
     ),
+    ("def_optional", "def foo(a = 1)\n  a\nend\nputs foo\nputs foo(2)\n"),
+    (
+        "def_optional_multi",
+        "def foo(a, b = 1, c = 2)\n  a + b + c\nend\nputs foo(1)\nputs foo(1, 2, 3)\n",
+    ),
+    ("def_rest", "def foo(*a)\n  a\nend\nputs foo(1, 2)\n"),
+    ("def_rest_named", "def foo(a, *b)\n  a\nend\nputs foo(1, 2, 3)\n"),
+    ("def_rest_anon", "def foo(*)\n  1\nend\nputs foo(1, 2)\n"),
+    ("def_post", "def foo(a, *b, c)\n  c\nend\nputs foo(1, 2, 3)\n"),
+    ("def_kw_required", "def foo(a:)\n  a\nend\nputs foo(a: 1)\n"),
+    ("def_kw_optional", "def foo(a: 1)\n  a\nend\nputs foo\nputs foo(a: 2)\n"),
+    (
+        "def_kw_mixed",
+        "def foo(a:, b: 2)\n  a + b\nend\nputs foo(a: 1)\n",
+    ),
+    ("def_kw_rest", "def foo(**h)\n  h\nend\nputs foo(a: 1)\n"),
+    ("def_kw_rest_anon", "def foo(**)\n  1\nend\nputs foo(a: 1)\n"),
+    ("def_block", "def foo(&b)\n  b.call(1)\nend\nfoo { |x| puts x }\n"),
+    ("def_block_anon", "def foo(&)\n  1\nend\nputs foo { 1 }\n"),
+    ("def_destructure", "def foo((a, b))\n  a + b\nend\nputs foo([1, 2])\n"),
+    (
+        "def_destructure_rest",
+        "def foo(a, (b, c))\n  a + b + c\nend\nputs foo(1, [2, 3])\n",
+    ),
+    (
+        "def_destructure_splat",
+        "def foo((a, *b))\n  a\nend\nputs foo([1, 2, 3])\n",
+    ),
+    ("def_endless_optional", "def foo(a = 1, &b) = a\nputs foo\n"),
+    (
+        "def_mixed",
+        "def foo(a, b = 1, *c, d, e:, f: 2, **g, &h)\n  [a, b, c, d, e, f, g]\nend\nputs foo(1, 2, 3, 4, e: 5, x: 6) { 7 }\n",
+    ),
+    ("def_forwarding", "def foo(...)\n  1\nend\nputs foo(1, 2)\n"),
 ];
 
 /// Deferred syntax: compilation must fail with a diagnostic, and must never
 /// emit bytes that diverge from the reference.
 const GATED: &[(&str, &str, &str)] = &[
-    ("def_optional_gated", "def foo(a = 1)\n  a\nend\nputs foo\n", "DefNode"),
-    ("def_rest_gated", "def foo(*a)\n  a\nend\nputs foo(1)\n", "DefNode"),
-    ("def_kw_gated", "def foo(a: 1)\n  a\nend\nputs foo\n", "DefNode"),
-    ("def_block_gated", "def foo(&b)\n  1\nend\nputs foo\n", "DefNode"),
     (
-        "def_destructure_gated",
-        "def foo((a, b))\n  a\nend\nputs foo(1)\n",
+        "def_nested_destructure_gated",
+        "def foo(a, (b, (c, d)))\n  a\nend\nputs foo(1, [2, [3, 4]])\n",
         "DefNode",
     ),
     ("ivar_op_gated", "@x = 1\n@x += 1\nputs @x\n", "InstanceVariableOperatorWriteNode"),
@@ -89,8 +119,6 @@ const GATED: &[(&str, &str, &str)] = &[
         "ClassVariableOrWriteNode",
     ),
     ("const_or_gated", "X = 1\nX ||= 2\nputs X\n", "ConstantOrWriteNode"),
-    ("backref_gated", "puts $&\n", "BackReferenceReadNode"),
-    ("numbered_ref_gated", "puts $1\n", "NumberedReferenceReadNode"),
     (
         "super_splat_gated",
         "class A\n  def foo(a)\n    a\n  end\nend\nclass B < A\n  def foo(a)\n    super(*a)\n  end\nend\n",

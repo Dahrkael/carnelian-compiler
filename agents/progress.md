@@ -127,3 +127,67 @@ Deviations and decisions during integration:
   `gen_module`/`gen_sclass` share a body-scope tail that C factors as
   `scope_body`; `gen_yield`/`gen_call_impl` repeat the `CALL_MAXARGS`
   protocol.
+
+## P2 remaining scope after the tranche integration
+
+Reference probe results (pinned `mruby-compiler2 0.5.0`):
+
+- `BEGIN` (`PM_PRE_EXECUTION_NODE`), `END` (`PM_POST_EXECUTION_NODE`) and
+  flip-flop (`PM_FLIP_FLOP_NODE`) are **not implemented by the reference
+  compiler itself** (`Not implemented: ...` / compile failure). No
+  byte-identical golden can exist, so our fail-closed diagnostics are the
+  correct end state, not a gap. Revisit only if the pin changes.
+- Done on `feature/p2-params` (certified byte-identical in both modes):
+  - Non-trivial parameters (P2.3/P2.4): optional, keyword (with/without
+    default), keyword-rest, rest, post, block parameter and destructured
+    parameters in `def`, blocks and lambdas, plus the full `OP_ENTER`/
+    aspec/ainfo computation and argument-setup opcodes (`OP_KEY_P`,
+    `OP_KARG`, `OP_KEYEND`, optional jump table, block move, `APOST`
+    destructuring). Includes `...` forwarding in definitions; call-side
+    `...` (`bar(...)`) stays gated as call-expression work.
+  - masgn targets beyond plain locals (P2.5): ivar/cvar/gvar/const/index/
+    call, including splat-index (`OP_ARYPUSH` gather path), `self.x`
+    (`OP_SSEND`) and nested plain-local multis.
+  - `defined?` and plain reads of back-references (`$&`, `$~`, `` $` ``,
+    `$'`, `$+`, `$1`… including unrepresentable numbers as nil).
+  - Non-decimal integer literals past `u128` (binary/octal/hex): overflow
+    digits now stringify the limb value like `pm_integer_string` instead of
+    slicing decimal source text.
+- Not possible (reference rejects; fail-closed diagnostics are the end
+  state, revisit only on pin bump):
+  - `&nil` (`MRC_ARGS_NOBLOCK`): all forms fail in the reference, and
+    upstream `ruby-prism 1.9.0` cannot parse them either.
+  - Constant-path masgn targets (`a, Foo::B = x`): reference errors with
+    `Not implemented (#1)` (no `PM_CONSTANT_PATH_TARGET_NODE` arm in its
+    `gen_assignment`).
+  - Destructured parameters with non-local parts (`def foo((@a, b))`):
+    both the reference and upstream Prism reject them at parse level.
+- Pending (reference-supported, still gated):
+  - `case/in` pattern matching (`codegen_pattern`, ~1000 lines of
+    failure-jump chaining and caching) — out of scope for this branch,
+    belongs to P2.6-pattern.
+  - Nested destructured parameters (`def foo((a, (b, c)))`): the reference
+    emits bytes derived from an unchecked C cast (the inner multi's
+    `lefts.size` misread as a pool id, e.g. `<<` for two lefts).
+    Replicating that deliberate garbage in safe Rust was declined; the gate
+    stands until upstream fixes the cast or the pin changes.
+  - `defined?` with a back-reference receiver (`defined?($&.foo)`):
+    needs the operand twice (check plus receiver value); the generic
+    `BackendNode` has no `Clone`. Vanishingly rare; gate stands.
+  - Call-side `...` forwarding (`bar(...)`): `ARGARY` transport in calls,
+    separate from definition-side support.
+
+## Reviewer round on P2-params (applied, same worktree)
+
+- No byte-divergence bugs found; all suites pass, clippy clean under
+  `-D warnings`, wasm32 build of the pure-Rust path passes.
+- Applied: unified the four `*_target_name` helpers into one
+  `either_target_name`; `ParamCounts::block_name` is taken, not cloned;
+  the `NIL_BLOCK` flag bit is a named constant.
+- Declined with reason: merging the two `gen_assignment` kind matches
+  (mirrors C's two switches: rhs prologue, then the store); sharing the
+  `gen_def` receiver arms or the class/module/sclass tails (pre-existing
+  shape, out of scope); replacing `format!("_{}", i)` numbered params
+  with a static table (pre-existing, equivalent output); comments noting
+  gates and reference workarounds (file convention; decisions also live
+  here); non-zero diagnostic offsets (file convention is `0, 0` for these).
