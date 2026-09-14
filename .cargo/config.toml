@@ -1,0 +1,5 @@
+# Musl hosts link build scripts statically by default, which breaks `dlopen`
+# (bindgen cannot load libclang: "Dynamic loading not supported").
+# Link musl artifacts dynamically so host build scripts can load libclang.
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=-crt-static"]
