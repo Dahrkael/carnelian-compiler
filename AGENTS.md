@@ -60,6 +60,11 @@ Guidelines for working on this repo.
   parent branch and merged to its parent branch.
 - If the parent branch has uncommited files push it to the stash, merge
   then pop the stash to restore the files.
+- Stay on plan unless blocked by insurmountable need. Every deviation
+  is recorded in agents/progress.md with cause. User decisions are not 
+  deviations but keep them tracked too.
+- After finishing a plan phase a reviewer subagent must be dispatched to 
+  search for bugs, duplicated code, optimizations and architectural improvements.
 
 ## Editing source files
 
