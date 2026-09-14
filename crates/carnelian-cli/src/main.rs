@@ -39,7 +39,7 @@ enum Command {
         #[arg(long)]
         strip: bool,
         /// Frontend selector.
-        #[arg(long, default_value = "owned")]
+        #[arg(long, default_value = "prism")]
         frontend: String,
     },
     /// Emit the pinned C reference golden (`mruby-compiler2 0.5.0`, dev only).
@@ -81,13 +81,6 @@ fn reference_bytes(source: &str) -> Result<Vec<u8>, String> {
             .compile(source)
             .map_err(|err| format!("reference compile failed: {err}"))
     }
-}
-
-fn model_has_bigint(irep: &carnelian_compiler::Irep) -> bool {
-    irep.pool
-        .iter()
-        .any(|entry| matches!(entry, carnelian_compiler::PoolValue::BigInt(_)))
-        || irep.reps.iter().any(model_has_bigint)
 }
 
 fn first_divergence(a: &[u8], b: &[u8]) -> Option<usize> {
@@ -142,57 +135,55 @@ fn cmd_verify(input: &PathBuf) -> i32 {
             return 1;
         }
     };
-
-    // Sanity: the reference must parse as RITE0400 under both readers.
-    // `mrubyedge 2.0.0` misreads pool type 7 (`BIGINT`: u16 length instead of
-    // the `dump.c` u8 length + verbatim bytes) and panics, so binaries with a
-    // bigint pool entry skip that cross-check; the carnelian reader is exact.
-    let model = match carnelian_compiler::read_rite(&reference) {
-        Ok(model) => model,
-        Err(err) => {
-            eprintln!("error: reference output rejected by carnelian reader: {err}");
+    // Both modes must match the same flags-`0` golden (see agents/progress.md).
+    for stripped in [false, true] {
+        let opts = carnelian_compiler::CompileOptions {
+            stripped,
+            filename: None,
+        };
+        let parsed = carnelian_front_prism::parse(source.as_bytes());
+        let errors = parsed.errors();
+        if !errors.is_empty() {
+            for diagnostic in &errors {
+                eprintln!(
+                    "error: {} ({}:{})",
+                    diagnostic.message, diagnostic.start, diagnostic.end
+                );
+            }
             return 1;
         }
-    };
-    let irep_count = if model_has_bigint(&model.root) {
-        println!("verify: note: bigint pool entry present, skipping mrubyedge cross-check");
-        model.root.reps.len() + 1
-    } else {
-        match mrubyedge::rite::load(&reference) {
-            Ok(parsed) => parsed.irep.len(),
-            Err(err) => {
-                eprintln!("error: reference output rejected by mrubyedge::rite: {err:?}");
+        let compiled = match carnelian_compiler::compile_prism(parsed.root(), &opts) {
+            Ok(bytes) => bytes,
+            Err(diagnostics) => {
+                eprint!("{diagnostics}");
                 return 1;
             }
-        }
-    };
-    let reemitted = carnelian_compiler::write_rite(&model);
-
-    match first_divergence(&reference, &reemitted) {
-        None => {
-            println!(
-                "verify: identical ({} bytes, {} top-level ireps)",
-                reference.len(),
-                irep_count
-            );
-            0
-        }
-        Some(offset) => {
-            let a = reference.get(offset).copied().unwrap_or(0);
-            let b = reemitted.get(offset).copied().unwrap_or(0);
-            eprintln!(
-                "divergence at offset {offset}: reference=0x{a:02x} writer=0x{b:02x} (len {} vs {})",
-                reference.len(),
-                reemitted.len()
-            );
-            3
+        };
+        match first_divergence(&reference, &compiled) {
+            None => {
+                println!(
+                    "verify: identical ({} bytes, stripped={stripped})",
+                    reference.len()
+                );
+            }
+            Some(offset) => {
+                let a = reference.get(offset).copied().unwrap_or(0);
+                let b = compiled.get(offset).copied().unwrap_or(0);
+                eprintln!(
+                    "divergence at offset {offset} (stripped={stripped}): reference=0x{a:02x} carnelian=0x{b:02x} (len {} vs {})",
+                    reference.len(),
+                    compiled.len()
+                );
+                return 3;
+            }
         }
     }
+    0
 }
 
-fn cmd_compile(input: &PathBuf, output: &PathBuf, frontend: &str) -> i32 {
-    if frontend != "owned" {
-        eprintln!("error: frontend '{frontend}' is unavailable in P0 (only 'owned')");
+fn cmd_compile(input: &PathBuf, output: &PathBuf, strip: bool, frontend: &str) -> i32 {
+    if frontend != "prism" {
+        eprintln!("error: frontend '{frontend}' is unavailable in P1 (only 'prism')");
         return 2;
     }
     let source = match read_input(input) {
@@ -202,13 +193,28 @@ fn cmd_compile(input: &PathBuf, output: &PathBuf, frontend: &str) -> i32 {
             return 2;
         }
     };
-    let opts = carnelian_compiler::CompileOptions::default();
-    match carnelian_compiler::compile(&source, &opts) {
+    let opts = carnelian_compiler::CompileOptions {
+        stripped: strip,
+        filename: None,
+    };
+    let parsed = carnelian_front_prism::parse(source.as_bytes());
+    let errors = parsed.errors();
+    if !errors.is_empty() {
+        for diagnostic in &errors {
+            eprintln!(
+                "error: {} ({}:{})",
+                diagnostic.message, diagnostic.start, diagnostic.end
+            );
+        }
+        return 1;
+    }
+    match carnelian_compiler::compile_prism(parsed.root(), &opts) {
         Ok(bytes) => {
             if let Err(err) = std::fs::write(output, &bytes) {
                 eprintln!("error: cannot write {}: {err}", output.display());
                 return 1;
             }
+            println!("compile: {} bytes -> {}", bytes.len(), output.display());
             0
         }
         Err(diagnostics) => {
@@ -235,9 +241,9 @@ fn main() {
         Some(Command::Compile {
             input,
             output,
-            strip: _,
+            strip,
             frontend,
-        }) => cmd_compile(input, output, frontend),
+        }) => cmd_compile(input, output, *strip, frontend),
         Some(Command::Reference { input, output }) => cmd_reference(input, output),
         Some(Command::Verify { input, strip: _ }) => cmd_verify(input),
     };
