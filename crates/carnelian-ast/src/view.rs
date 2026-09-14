@@ -175,6 +175,106 @@ pub struct ParamsView<N> {
     pub block: Option<N>,
 }
 
+/// Method definition parts (`DefNode`). `required_params` holds the required
+/// positional names in order; any optional/rest/post/keyword/block form is
+/// gated (the accessor returns `None` like `call_args` does for splats).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefView<N> {
+    /// Method name bytes.
+    pub name: Vec<u8>,
+    /// Explicit receiver (`def self.foo`, `None` for plain `def`).
+    pub receiver: Option<N>,
+    /// Required positional parameter names in order.
+    pub required_params: Vec<Vec<u8>>,
+    /// Body node (`None` for an empty body).
+    pub body: Option<N>,
+    /// Method-scope locals in order (includes parameters).
+    pub locals: Vec<Vec<u8>>,
+}
+
+/// Class parts (`ClassNode`). The constant path is either a plain read
+/// (`cpath_is_read`) or a scoped path with an optional parent (`None` parent
+/// is the rooted `::Foo` form).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassView<N> {
+    /// Class name bytes.
+    pub name: Vec<u8>,
+    /// True for `class Foo` (emits `LOADNIL` for the outer object).
+    pub cpath_is_read: bool,
+    /// Parent object for `class Foo::Bar` (`None` for plain or rooted).
+    pub cpath_parent: Option<N>,
+    /// Superclass expression (`None` for an implicit superclass).
+    pub superclass: Option<N>,
+    /// Body node (`None` for an empty body).
+    pub body: Option<N>,
+    /// Class-body locals in order.
+    pub locals: Vec<Vec<u8>>,
+}
+
+/// Module parts (`ModuleNode`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleView<N> {
+    /// Module name bytes.
+    pub name: Vec<u8>,
+    /// True for `module Foo` (emits `LOADNIL` for the outer object).
+    pub cpath_is_read: bool,
+    /// Parent object for `module Foo::Bar` (`None` for plain or rooted).
+    pub cpath_parent: Option<N>,
+    /// Body node (`None` for an empty body).
+    pub body: Option<N>,
+    /// Module-body locals in order.
+    pub locals: Vec<Vec<u8>>,
+}
+
+/// Singleton class parts (`SingletonClassNode`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SclassView<N> {
+    /// Subject expression (`class << expr`).
+    pub expression: N,
+    /// Body node (`None` for an empty body).
+    pub body: Option<N>,
+    /// Body locals in order.
+    pub locals: Vec<Vec<u8>>,
+}
+
+/// Plain variable or constant write target (`name = value`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarWrite<N> {
+    /// Variable or constant name bytes.
+    pub name: Vec<u8>,
+    /// Right-hand side.
+    pub value: N,
+}
+
+/// Constant path write target (`Parent::Name = value`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstPathWrite<N> {
+    /// Parent object (`None` for the rooted `::Name` form).
+    pub parent: Option<N>,
+    /// Constant name bytes.
+    pub name: Vec<u8>,
+    /// Right-hand side.
+    pub value: N,
+}
+
+/// Constant path read (`Parent::Name`, `::Name` when parent is `None`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstPathRead<N> {
+    /// Parent object (`None` for the rooted form).
+    pub parent: Option<N>,
+    /// Constant name bytes.
+    pub name: Vec<u8>,
+}
+
+/// Explicit `super` call (`SuperNode` with plain positional arguments).
+/// `args` is `None` for `super()` and `Some` (possibly empty) otherwise;
+/// splat/keyword/forwarding forms and block arguments are gated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuperView<N> {
+    /// Plain positional arguments (`None` for empty `super()`).
+    pub args: Option<Vec<N>>,
+}
+
 /// Handler-facing node access. See the module docs.
 pub trait BackendNode: AstNode + Sized {
     /// Integer literal value.
@@ -360,6 +460,87 @@ pub trait BackendNode: AstNode + Sized {
 
     /// `it` read (`ItLocalVariableReadNode`).
     fn it_read(&self) -> Option<()> {
+        None
+    }
+
+    /// Method definition (`DefNode`); `None` for complex parameter forms.
+    fn def_view(&self) -> Option<DefView<Self>> {
+        None
+    }
+
+    /// Class definition (`ClassNode`).
+    fn class_view(&self) -> Option<ClassView<Self>> {
+        None
+    }
+
+    /// Module definition (`ModuleNode`).
+    fn module_view(&self) -> Option<ModuleView<Self>> {
+        None
+    }
+
+    /// Singleton class (`SingletonClassNode`).
+    fn sclass_view(&self) -> Option<SclassView<Self>> {
+        None
+    }
+
+    /// Constant read name (`ConstantReadNode`).
+    fn const_read(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Constant write (`ConstantWriteNode`).
+    fn const_write(&self) -> Option<VarWrite<Self>> {
+        None
+    }
+
+    /// Constant path read (`ConstantPathNode`).
+    fn const_path(&self) -> Option<ConstPathRead<Self>> {
+        None
+    }
+
+    /// Constant path write (`ConstantPathWriteNode`).
+    fn const_path_write(&self) -> Option<ConstPathWrite<Self>> {
+        None
+    }
+
+    /// Instance variable read name (`InstanceVariableReadNode`).
+    fn ivar_read(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Instance variable write (`InstanceVariableWriteNode`).
+    fn ivar_write(&self) -> Option<VarWrite<Self>> {
+        None
+    }
+
+    /// Class variable read name (`ClassVariableReadNode`).
+    fn cvar_read(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Class variable write (`ClassVariableWriteNode`).
+    fn cvar_write(&self) -> Option<VarWrite<Self>> {
+        None
+    }
+
+    /// Global variable read name (`GlobalVariableReadNode`).
+    fn gvar_read(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Global variable write (`GlobalVariableWriteNode`).
+    fn gvar_write(&self) -> Option<VarWrite<Self>> {
+        None
+    }
+
+    /// Explicit `super` call (`SuperNode`); `None` for complex arguments.
+    fn super_view(&self) -> Option<SuperView<Self>> {
+        None
+    }
+
+    /// Bare `super` without arguments (`ForwardingSuperNode`); inner `Some`
+    /// carries an explicit block (gated), `None` is plain pass-through.
+    fn forwarding_super(&self) -> Option<Option<Self>> {
         None
     }
 }

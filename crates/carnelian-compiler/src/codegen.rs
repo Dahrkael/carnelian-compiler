@@ -990,6 +990,26 @@ impl Scope {
         Ok((self.syms.len() - 1) as u16)
     }
 
+    /// Variable/constant store with `MOVE` folding (`gen_setxv`).
+    pub fn gen_setxv(
+        &mut self,
+        session: &mut Session,
+        op: u8,
+        mut dst: u16,
+        name: &[u8],
+        val: bool,
+    ) -> Result<(), Diagnostic> {
+        let idx = self.new_sym(session, name)?;
+        if !val && !self.no_peephole(session) {
+            let data = self.last_insn();
+            if data.insn == opcode::OP_MOVE && data.a == u32::from(dst) {
+                dst = data.b;
+                self.pc = self.lastpc;
+            }
+        }
+        self.genop_2(session, op, dst, idx)
+    }
+
     /// Reserve a catch handler slot (`catch_handler_new`).
     pub fn catch_new(&mut self) -> usize {
         let entry = self.catch_table.len();

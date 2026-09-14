@@ -80,11 +80,6 @@ const GATED: &[(&str, &str, &str)] = &[
         "x = 1\nputs :\"s#{x}\"\n",
         "InterpolatedSymbolNode",
     ),
-    (
-        "interp_ivar_gated",
-        "puts \"hi #@v\"\n",
-        "InstanceVariableReadNode",
-    ),
 ];
 
 fn carnelian() -> Command {
