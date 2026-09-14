@@ -76,3 +76,19 @@ is recorded here with cause. User decisions are not deviations.
   carries an extra unconditional jump), a widening helper for `genop_*`
   (hot path, no need), removing the `last_insn` fallback (it guards genuinely
   unreachable decodes).
+
+## Reviewer round on P2 (applied, same worktree)
+
+- No faithfulness bugs found. Applied: shared `flush_hash_pairs` tail,
+  `emit_load2` for the leading empty literal, `val_stack_limit` helper,
+  `emit_absent_else` at the three identical sites, `u32` limit consts,
+  `try_from` counts instead of silent `as` casts.
+- The new multi-splat corpus caught a real pre-existing bug: `flush_hash_pairs`
+  read the destination before the extra `HASHADD` pop. Fixed; all other `dst`
+  reads audited clean.
+- Declined: merging the `gen_case`/`gen_if` valued merges (different shapes:
+  `pos3` chain, conditional pop and move); only the identical absent-`else`
+  fragment was shared.
+- Skipped e2e with reason: bare `when *` (rejected by the reference parser),
+  `#@v` (needs P2.4 ivars), empty-node `when` bodies (Prism only yields null;
+  covered at adapter level).
