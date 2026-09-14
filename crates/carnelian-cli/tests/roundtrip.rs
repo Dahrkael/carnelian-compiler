@@ -1,5 +1,6 @@
-//! P0 certification through the CLI: `reference` emits the pinned C golden,
-//! `verify` round-trips it through the Rust writer. Byte-identity is required.
+//! Writer certification: `reference` emits the pinned C golden through the
+//! CLI, then the Rust reader/writer round-trips it to identical bytes.
+//! (`verify` compares real codegen output; see `p1_verify.rs`.)
 
 use std::process::Command;
 
@@ -76,17 +77,11 @@ fn reference_and_verify_are_byte_identical() {
         assert!(again.status.success(), "{name}: second reference failed");
         assert_eq!(bytes, std::fs::read(&golden2).expect("read golden2"));
 
-        // Round-trip through the Rust writer must be identical (exit 0).
-        let verify = carnelian()
-            .arg("verify")
-            .arg(&input)
-            .output()
-            .expect("run verify");
+        // Round-trip through the Rust reader/writer must be identical.
+        let reemitted = carnelian_compiler::roundtrip(&bytes).expect("round-trip parses");
         assert_eq!(
-            verify.status.code(),
-            Some(0),
-            "{name}: verify failed: {}",
-            String::from_utf8_lossy(&verify.stderr)
+            bytes, reemitted,
+            "{name}: writer diverged from the C golden"
         );
     }
 }
@@ -95,7 +90,7 @@ fn reference_and_verify_are_byte_identical() {
 fn cli_exit_codes() {
     let dir = tempfile::tempdir().expect("tempdir");
 
-    // `compile` is a P0 stub: exits 1 with diagnostics on stderr.
+    // `compile --frontend prism` emits the program (exit 0).
     let input = dir.path().join("ok.rb");
     let output = dir.path().join("ok.mrb");
     std::fs::write(&input, "puts 1\n").expect("write");
@@ -106,7 +101,38 @@ fn cli_exit_codes() {
         .arg(&output)
         .output()
         .expect("run compile");
-    assert_eq!(compile.status.code(), Some(1));
+    assert_eq!(
+        compile.status.code(),
+        Some(0),
+        "compile failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    assert!(output.exists());
+
+    // Unavailable frontends are a usage error (exit 2).
+    let owned = carnelian()
+        .arg("compile")
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .arg("--frontend")
+        .arg("owned")
+        .output()
+        .expect("run owned compile");
+    assert_eq!(owned.status.code(), Some(2));
+
+    // Broken source fails compilation with exit 1.
+    let bad = dir.path().join("bad.rb");
+    let bad_out = dir.path().join("bad.mrb");
+    std::fs::write(&bad, "def (\n").expect("write");
+    let bad_compile = carnelian()
+        .arg("compile")
+        .arg(&bad)
+        .arg("-o")
+        .arg(&bad_out)
+        .output()
+        .expect("run bad compile");
+    assert_eq!(bad_compile.status.code(), Some(1));
 
     // Broken source fails the C reference with exit 1.
     let bad = dir.path().join("bad.rb");
@@ -137,7 +163,7 @@ fn locked_pins_match_pins_md() {
     for (name, version) in [
         ("mruby-compiler2-sys", "0.5.0"),
         ("ruby-prism", "1.9.0"),
-        ("mrubyedge", "2.0.0"),
+        ("ruby-prism-sys", "1.9.0"),
     ] {
         let entry = format!("name = \"{name}\"\nversion = \"{version}\"");
         assert!(
