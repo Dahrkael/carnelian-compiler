@@ -308,3 +308,96 @@ Frozen files untouched: `view.rs`, `handlers.rs`, `front-owned`
   `front-prism` crate docs, `plan.md` workspace map (also fixed its
   `front-mri` phase typo: Fase 4, not 3). Declined: wiring the inert
   `front-*` feature flags (P4 owns that).
+
+## P4-C: CLI wiring + parity suite + pins (worktree feature/p4-mri, unmerged)
+
+Scope: `carnelian-cli` only (`Cargo.toml`, `src/main.rs`, `tests/*`,
+plus the `PINS.md` row and this note). Frozen contracts untouched:
+`front-mri` `parse`/`lower`/`scope`/`lib`, `carnelian-ast`,
+`carnelian-compiler`, `front-prism`.
+
+- CLI: `compile --frontend mri` = `front_mri::parse` (parse errors print
+  as `error: msg (start:end)`, exit 1, same shape as prism) then the
+  end-to-end `front_mri::compile(source, opts)`. Unknown frontends stay
+  exit 2; exit codes 0/1/2 unchanged.
+- New `tests/p4_mri.rs`: 321 snippets (315 tables minus the `it` ceiling
+  exclusion, plus 7 synthetic) x 2 modes x 4-way
+  `reference`/`prism`/`owned`/`mri`; 21 gated agreements x 3 frontends
+  with shared markers; 3 grammar-ceiling gates (`it`, anonymous 3.2
+  `*`/`**` forwarding) with per-frontend expectations (`mri` exit 1,
+  prism/owned exit 0); 6 scope-vector snippets (nesting, shadowing,
+  upvar depths, block-locals, def boundary); 5 `for` parity snippets;
+  one host smoke pinning `front_mri::compile("puts 1")` bytes.
+- `roundtrip.rs::cli_exit_codes` gained the `mri` exit-0 block (existing
+  assertions identical); `locked_pins_match_pins_md` covers
+  `lib-ruby-parser 4.0.6+ruby-3.1.2` and `lib-ruby-parser-ast 0.55.0`.
+- Wasm: `cargo check -p carnelian-ast -p carnelian-compiler
+  -p carnelian-front-mri --target wasm32-unknown-unknown` passes, so
+  `lib-ruby-parser` needs no C on the shipping path.
+- Blocked green: `front_mri::parse` (`parse.rs`, `todo!`), `lower`
+  (`lower.rs`, `todo!`) and the end-to-end `compile` (`lib.rs`, `todo!`).
+  Sibling B's `resolve_scopes` (`scope.rs`) landed. Every `mri` test
+  fails with exit 101 and `not yet implemented: P4: run the MRI parser`
+  until parse/lower/compile land.
+- Sibling D landed mid-session: backend `gen_for` plus `ForView` on the
+  trait, `Owned` and `PrismNode`, so `for` compiles exit 0 and matches
+  the reference on all probed variants. `P25_GATED::for_gated` was removed
+  from the corpus table (not by P4-C); no `for` snippet was added to
+  `P25_SNIPPETS`, so `for` currently has no shared-corpus coverage — the
+  five `FOR_SNIPPETS` in `tests/p4_mri.rs` cover the gap until the
+  coordinator adds entries. The pre-existing `p25`/`p3` gated suites are
+  green again after the removal.
+- Probe notes (pinned `lib-ruby-parser`, throwaway crate outside the
+  repo): bare `bar(*)`/`bar(**)` forwarding and endless setters fail at
+  parse; `it` parses as a send, so its gate needs explicit frontend
+  logic; endless setters also fail under prism/reference, so they are
+  not ceiling gates. No deviation from the plan.
+
+## P4 integration (coordinator)
+
+- `parse.rs` + `compile()` (unassigned in the split) implemented here:
+  `Parser::new`/`do_parse`, errors-only mapping via `render_message`,
+  `root()` returns `Option` (empty source has no AST). `compile()` wraps
+  the lowered tree in a synthesized `ProgramNode` (`lower()` keeps its
+  bare contract pinned by 59 tests) and synthesizes an empty program for
+  `""`; then resolve scopes and `compile_tree`.
+- `it` ceiling scan: bare `it` sends inside block bodies fail with a
+  ceiling diagnostic (explicit `|it|`-family params shadow per block;
+  `def`/`class`/`module`/`sclass` seal the outer stack but keep
+  scanning inside; lambdas/numblocks inherit). Top-level `it` still
+  compiles as a plain call (3.1-correct).
+- `BlockPass` split: trailing `&block` fills `CallNode.block`,
+  `SuperNode.block` and index-read `[]` calls (was an argument item →
+  `SEND` instead of `SENDB`); `YieldNode` has no block field, stays
+  inline like FFI. Index writes with `&` fail on both sides (parse
+  reject vs attribute gate), no action.
+- Destructured rest: `def` params arrive as `Mlhs` with `Restarg`
+  (masgn uses `Splat`), so both `split_mlhs` and `lower_destructured`
+  split rest/rights; anonymous rest matches Prism's `SplatNode`
+  (probe-verified). One agent-A test expectation fixed to the Prism shape.
+- Parenthesized single statements wrap in `StatementsNode` (Prism shape;
+  `defined?` unwraps exactly that) — fixes `defined?((x))`.
+- Gated markers may differ by locus: `mri_marker` override table in
+  `p4_mri.rs` (Prism parse-rejects bare `yield` as `Invalid yield`,
+  MRI reaches the backend `invalid yield`).
+- `for` snippets moved to shared `P25_SNIPPETS` (4-way for all
+  frontends); agent C's `FOR_SNIPPETS`/`for_parity` removed as duplicate.
+  `index_block_arg` added to the shared corpus for the read path.
+- Exit state: full workspace suite green (incl. 326×2×4 parity, 21
+  gated agreements, scope vectors, ceiling gates, host smoke),
+  clippy `-D warnings` clean, fmt clean, `wasm32` check passes for
+  `ast`+`compiler`+`front-mri` (pure-Rust end-to-end closure).
+  Follow-ups: `recv_ready` gathered-call threading (deferred, fail-closed
+  family); sharing small helpers across frontends (stable ports).
+
+## Reviewer round on P4 integration (applied, same worktree)
+
+- Real bugs fixed: the `it` scan skipped block calls (`foo(it) {}`),
+  sealed superclass/`sclass`/definee expressions that evaluate outside,
+  and `Lvar`-bound `it` reads from nested param-less blocks (all silent
+  divergences, all now gated with the ceiling diagnostic); binder
+  detection looks through `Procarg0`/`Mlhs` wrappers.
+- Declined with reason: `debug_assert!` guards on unreachable
+  `BlockPass` positions (both grammars parse-reject; the shapes are
+  documented); single-parse CLI (harmless, matches existing arms);
+  span-style nits (byte-harmless).
