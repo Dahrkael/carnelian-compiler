@@ -11,8 +11,14 @@ keywords = ["ruby", "mruby", "playground"]
 name = "playground"
 path = "src/main.rs"
 
+[lib]
+name = "carnelian_playground"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 carnelian-ast = { workspace = true }
 carnelian-compiler = { workspace = true }
 carnelian-front-mri = { workspace = true }
 mrubyedge = { git = "https://github.com/Dahrkael/mrubyedge", tag = "v2.0.0-ng.2" }
+wasm-bindgen = "=0.2.127"
