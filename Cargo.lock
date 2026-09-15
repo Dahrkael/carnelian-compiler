@@ -12,6 +12,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "alloc-from-pool"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bee030c58cf5648ea793d06e5aa6039f913bfbf9f68a0635c76ba429d393fa6c"
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -132,6 +138,15 @@ name = "carnelian-compiler"
 version = "0.1.0"
 dependencies = [
  "carnelian-ast",
+]
+
+[[package]]
+name = "carnelian-front-mri"
+version = "0.1.0"
+dependencies = [
+ "carnelian-ast",
+ "carnelian-compiler",
+ "lib-ruby-parser",
 ]
 
 [[package]]
@@ -298,6 +313,22 @@ name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
+name = "lib-ruby-parser"
+version = "4.0.6+ruby-3.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a64ffd6ab03aa1e6a986b42260202e25fb8d197dd7be0de11088cca389f67ce"
+dependencies = [
+ "alloc-from-pool",
+ "lib-ruby-parser-ast",
+]
+
+[[package]]
+name = "lib-ruby-parser-ast"
+version = "0.55.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "461948472e72b507a0f97e144c453e29b8772e986f18b410e0f2318edd45258c"
 
 [[package]]
 name = "libc"

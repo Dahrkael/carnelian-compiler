@@ -1,0 +1,13 @@
+[package]
+name = "carnelian-front-mri"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Phase 4 frontend: pure-Rust parsing (lib-ruby-parser) with lowering to the owned AST"
+keywords = ["ruby", "parser", "ast"]
+
+[dependencies]
+carnelian-ast = { workspace = true }
+carnelian-compiler = { workspace = true }
+lib-ruby-parser = "=4.0.6+ruby-3.1.2"
