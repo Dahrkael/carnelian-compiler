@@ -127,6 +127,7 @@ version = "0.1.0"
 dependencies = [
  "carnelian-ast",
  "carnelian-compiler",
+ "carnelian-front-mri",
  "carnelian-front-prism",
  "clap",
  "mruby-compiler2-sys",
