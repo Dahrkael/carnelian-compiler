@@ -1,8 +1,8 @@
 # carnelian-compiler
 
-Ruby → RITE (mruby) bytecode compiler written in Rust, byte-identical to
-the pinned reference (`mruby-compiler2 0.5.0` + Prism 1.9.0). License:
-BSD 2-Clause (see `LICENSE`).
+Ruby → RITE (mruby) bytecode compiler written in Rust (no_std, no unsafes).
+Byte-identical to the pinned reference (`mruby-compiler2 0.5.0` + Prism 1.9.0).
+License: BSD 2-Clause (see `LICENSE`).
 
 Try it in the browser: **https://dahrkael.github.io/carnelian-compiler/**
 
