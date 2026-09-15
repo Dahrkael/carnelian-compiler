@@ -107,6 +107,10 @@ pub struct Scope {
     pub nregs: u16,
     /// `for` scopes above (upvar depth adjustment).
     pub for_depth: u16,
+    /// True for `for` body scopes (`scope_new` with `lv == NULL`): no own
+    /// locals, so `lv_idx` returns 0 and upvar search walks past (while
+    /// still counting the level, like C's `search_upvar`).
+    pub invisible: bool,
     /// Recursion level against `MRC_CODEGEN_LEVEL_MAX` (`s->rlev`).
     pub rlev: u32,
     /// True for the dummy top scope created by `generate_code`.
@@ -174,6 +178,7 @@ impl Scope {
             nlocals: 0,
             nregs: 0,
             for_depth: 0,
+            invisible: false,
             rlev: 0,
             is_top: true,
         }
@@ -212,12 +217,30 @@ impl Scope {
             nlocals: 0,
             nregs: 0,
             for_depth: 0,
+            invisible: false,
             rlev: 0,
             is_top: false,
         };
         scope.sp = locals.len() as u16 + 1; // add self
         scope.nlocals = scope.sp;
         scope.nregs = scope.sp;
+        Ok(scope)
+    }
+
+    /// Child scope for a `for` body (`scope_new` with `lv == NULL`): no own
+    /// names, but the parent's register layout (`sp = prev.nlocals`, with
+    /// the parent's `lv` table so `finish` emits the same copy) and one
+    /// deeper `for_depth`.
+    pub fn for_child(session: &mut Session, parent: &Scope) -> Result<Self, Diagnostic> {
+        let names = parent.lv_names.clone();
+        let mut scope = Self::child(session, parent, &names)?;
+        // `child` derives `len + 1`, which equals `nlocals` here; assign
+        // explicitly like C (`s->sp = prev->nlocals`, ...).
+        scope.sp = parent.nlocals;
+        scope.nlocals = parent.nlocals;
+        scope.nregs = parent.nlocals;
+        scope.for_depth = parent.for_depth + 1;
+        scope.invisible = true;
         Ok(scope)
     }
 
@@ -834,7 +857,12 @@ impl Scope {
     }
 
     /// Local slot for a name (`lv_idx`, 1-based, `0` when absent).
+    /// Invisible `for` scopes hold no own locals (`lv == NULL`), so this
+    /// returns 0 and upvar search walks past them.
     pub fn lv_idx(&self, name: &[u8]) -> u16 {
+        if self.invisible {
+            return 0;
+        }
         self.lv_names
             .iter()
             .position(|known| known == name)

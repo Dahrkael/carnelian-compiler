@@ -95,6 +95,19 @@ pub struct WhileView<N> {
     pub begin_modifier: bool,
 }
 
+/// `for` parts (`ForNode`). The frontend opens no scope of its own (Prism
+/// has none); the backend opens the invisible child scope itself, so there
+/// is no `locals` field here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForView<N> {
+    /// Loop variable (`LocalVariableWriteNode` or `MultiTargetNode`).
+    pub index: N,
+    /// Collection expression.
+    pub collection: N,
+    /// Body statements (`None` for a null subtree).
+    pub statements: Option<Vec<N>>,
+}
+
 /// `case` parts. `whens` holds the `WhenNode` children in order;
 /// `else_body` is the `ElseNode` wrapper (`None` when absent).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -421,6 +434,11 @@ pub trait BackendNode: AstNode + Clone + Sized {
 
     /// `while`/`until` parts.
     fn while_loop(&self) -> Option<WhileView<Self>> {
+        None
+    }
+
+    /// `for` parts (`ForNode`).
+    fn for_view(&self) -> Option<ForView<Self>> {
         None
     }
 

@@ -437,6 +437,7 @@ fn codegen_dispatch<N: BackendNode>(
             codegen(cg, variable, val)
         }
         "WhileNode" | "UntilNode" => gen_while(cg, node, val),
+        "ForNode" => gen_for(cg, node, val),
         "AndNode" => gen_logic(cg, node, val, false),
         "OrNode" => gen_logic(cg, node, val, true),
         "LocalVariableReadNode" => gen_lvar_read(cg, node, val),
@@ -3577,6 +3578,86 @@ fn gen_while<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(),
     {
         let (session, scope) = cg.current();
         scope.loop_pop(session, val)?;
+    }
+    Ok(())
+}
+
+/// `for` loop (`for_body`): the collection evaluates in the current scope,
+/// then an invisible child scope (`lv == NULL`) takes the block parameter
+/// in register 1, assigns the loop variable, and codes the body; back in
+/// the parent the child becomes a block sent to `each`.
+fn gen_for<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(view) = node.for_view() else {
+        return Err(unsupported(&node, "for"));
+    };
+    // Receiver in the current scope (`VAL`).
+    codegen(cg, view.collection, true)?;
+    // Invisible child scope over the parent register layout.
+    let child = Scope::for_child(&mut cg.session, cg.scopes.last().expect("open scope"))?;
+    cg.scopes.push(child);
+    {
+        // `push()` for the block parameter.
+        let (_, scope) = cg.current();
+        scope.push_n(1)?;
+    }
+    {
+        // Block-like entry, not the normal `aspec` computation.
+        let (_, scope) = cg.current();
+        scope.genop_w(opcode::OP_ENTER, 0x40000)?;
+    }
+    // Loop variable from register 1 (`VAL` for multi, `NOVAL` otherwise).
+    if view.index.kind_name() == "MultiTargetNode" {
+        let Some(target) = view.index.multi_target_view() else {
+            return Err(unsupported(&node, "for index"));
+        };
+        gen_massignment(cg, target.lefts, target.rest, target.rights, 1, true)?;
+    } else {
+        gen_assignment(cg, view.index, None, 1, false)?;
+    }
+    {
+        // Loop frame (`LOOP_FOR`, so `break`/`next` later take the
+        // proc-style path like `BLOCK`); `redo` lands on the `NOP`.
+        let (_, scope) = cg.current();
+        scope.loop_push(LoopType::For);
+        let redo = scope.new_label();
+        scope.loops.last_mut().expect("for loop").pc1 = redo;
+        scope.genop_0(opcode::OP_NOP)?;
+    }
+    // Body (`VAL`), `RETURN`, close frame, finish child.
+    gen_branch(cg, view.statements, true)?;
+    cg.current().1.pop_n(1)?;
+    {
+        let (session, scope) = cg.current();
+        let ret = scope.cursp();
+        scope.gen_return(session, opcode::OP_RETURN, ret)?;
+    }
+    {
+        let (session, scope) = cg.current();
+        scope.loop_pop(session, false)?;
+    }
+    let index = cg.pop_scope()?;
+    let child_index = u16::try_from(index).map_err(|_| too_complex())?;
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_BLOCK, dst, child_index)?;
+        // `push();pop();` leaves space for the block, then `pop()` drops
+        // the collection the `SENDB` below consumes.
+        scope.push_n(1)?;
+        scope.pop_n(1)?;
+        scope.pop_n(1)?;
+    }
+    let sym = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, b"each")?
+    };
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_3(session, opcode::OP_SENDB, dst, sym, 0)?;
+    }
+    if val {
+        cg.current().1.push_n(1)?;
     }
     Ok(())
 }

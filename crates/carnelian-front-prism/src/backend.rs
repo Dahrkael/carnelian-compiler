@@ -2,10 +2,10 @@
 
 use carnelian_ast::view::{
     BackendNode, BeginView, BlockParamView, BlockView, CallTargetView, CallView, CaseView,
-    ClassView, ConstPathRead, ConstPathWrite, DefView, EnsureView, IfView, IndexTargetView,
-    IntegerLit, KeywordParamView, LambdaView, LvarRef, LvarWrite, ModuleView, MultiTargetView,
-    MultiWriteView, ParamsView, ProgramView, RescueModifierView, RescueView, SclassView, SimpleLit,
-    SuperView, VarWrite, WhenView, WhileView, YieldView,
+    ClassView, ConstPathRead, ConstPathWrite, DefView, EnsureView, ForView, IfView,
+    IndexTargetView, IntegerLit, KeywordParamView, LambdaView, LvarRef, LvarWrite, ModuleView,
+    MultiTargetView, MultiWriteView, ParamsView, ProgramView, RescueModifierView, RescueView,
+    SclassView, SimpleLit, SuperView, VarWrite, WhenView, WhileView, YieldView,
 };
 use carnelian_ast::AstNode;
 
@@ -193,6 +193,17 @@ impl BackendNode for PrismNode<'_> {
             begin_modifier: u32::from(node.flags())
                 & ruby_prism_sys::pm_loop_flags::PM_LOOP_FLAGS_BEGIN_MODIFIER as u32
                 != 0,
+        })
+    }
+
+    fn for_view(&self) -> Option<ForView<Self>> {
+        let node = self.inner.as_for_node()?;
+        Some(ForView {
+            index: wrap(node.index()),
+            collection: wrap(node.collection()),
+            statements: node
+                .statements()
+                .map(|statements| wrap_many(statements.body())),
         })
     }
 

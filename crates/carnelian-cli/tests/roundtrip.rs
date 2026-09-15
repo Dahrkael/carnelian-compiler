@@ -108,6 +108,29 @@ fn cli_exit_codes() {
         "owned diverges from prism"
     );
 
+    // `compile --frontend mri` matches `prism` byte for byte (exit 0).
+    let mri_out = dir.path().join("ok.mri.mrb");
+    let mri = carnelian()
+        .arg("compile")
+        .arg(&input)
+        .arg("-o")
+        .arg(&mri_out)
+        .arg("--frontend")
+        .arg("mri")
+        .output()
+        .expect("run mri compile");
+    assert_eq!(
+        mri.status.code(),
+        Some(0),
+        "mri compile failed: {}",
+        String::from_utf8_lossy(&mri.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&output).expect("read prism output"),
+        std::fs::read(&mri_out).expect("read mri output"),
+        "mri diverges from prism"
+    );
+
     // Unknown frontends are a usage error (exit 2).
     let unknown = carnelian()
         .arg("compile")
@@ -163,6 +186,8 @@ fn locked_pins_match_pins_md() {
         ("mruby-compiler2-sys", "0.5.0"),
         ("ruby-prism", "1.9.0"),
         ("ruby-prism-sys", "1.9.0"),
+        ("lib-ruby-parser", "4.0.6+ruby-3.1.2"),
+        ("lib-ruby-parser-ast", "0.55.0"),
     ] {
         let entry = format!("name = \"{name}\"\nversion = \"{version}\"");
         assert!(

@@ -5,10 +5,10 @@
 
 use crate::view::{
     BackendNode, BeginView, BlockParamView, BlockView, CallTargetView, CallView, CaseView,
-    ClassView, ConstPathRead, ConstPathWrite, DefView, EnsureView, IfView, IndexTargetView,
-    IntegerLit, KeywordParamView, LambdaView, LvarRef, LvarWrite, ModuleView, MultiTargetView,
-    MultiWriteView, ParamsView, ProgramView, RescueModifierView, RescueView, SclassView, SimpleLit,
-    SuperView, VarWrite, WhenView, WhileView, YieldView,
+    ClassView, ConstPathRead, ConstPathWrite, DefView, EnsureView, ForView, IfView,
+    IndexTargetView, IntegerLit, KeywordParamView, LambdaView, LvarRef, LvarWrite, ModuleView,
+    MultiTargetView, MultiWriteView, ParamsView, ProgramView, RescueModifierView, RescueView,
+    SclassView, SimpleLit, SuperView, VarWrite, WhenView, WhileView, YieldView,
 };
 use crate::{
     arguments_node_flags, call_node_flags, loop_flags, AstNode, Integer, Node, Span, SymbolId,
@@ -247,6 +247,22 @@ impl BackendNode for Owned<'_> {
                 body: self.stmts(statements),
                 is_until: true,
                 begin_modifier: flags & loop_flags::BEGIN_MODIFIER != 0,
+            }),
+            _ => None,
+        }
+    }
+
+    fn for_view(&self) -> Option<ForView<Self>> {
+        match &self.node {
+            Node::ForNode {
+                index,
+                collection,
+                statements,
+                ..
+            } => Some(ForView {
+                index: self.child(index),
+                collection: self.child(collection),
+                statements: self.stmts(statements),
             }),
             _ => None,
         }

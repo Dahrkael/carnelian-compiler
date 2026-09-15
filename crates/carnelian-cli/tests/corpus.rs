@@ -405,6 +405,7 @@ pub const P25_SNIPPETS: &[(&str, &str)] = &[
     ("call_splat_tail", "a = [1, 2]\nf(*a, 3)\n"),
     ("call_splat_multi", "a = [1]\nb = [2]\nf(*a, *b)\n"),
     ("call_splat_kw", "a = [1]\nf(*a, k: 2)\n"),
+    ("index_block_arg", "a = [0, 1]\nputs a[0, &b]\n"),
     // `...` forwarding calls
     (
         "call_forward",
@@ -534,6 +535,20 @@ pub const P25_SNIPPETS: &[(&str, &str)] = &[
         "masgn_nested_ivar",
         "(@a, @b), c = [1, 2], 3\nputs @a\nputs c\n",
     ),
+    ("for_basic", "for i in [1, 2] do\n  puts i\nend\n"),
+    ("for_no_do", "for i in [1]\n  puts i\nend\n"),
+    (
+        "for_multi_target",
+        "for a, b in [[1, 2]] do\n  puts a\n  puts b\nend\n",
+    ),
+    (
+        "for_nested",
+        "for i in [1, 2] do\n  for j in [3] do\n    puts i + j\n  end\nend\n",
+    ),
+    (
+        "for_lvar_collection",
+        "x = [1, 2]\nfor i in x do\n  puts i\nend\n",
+    ),
 ];
 
 /// `GATED` table from `p25_rescue.rs`.
@@ -543,11 +558,22 @@ pub const P25_GATED: &[(&str, &str, &str)] = &[
         "class Foo25\nend\nFoo25::A, b = 1, 2\n",
         "ConstantPathTargetNode",
     ),
-    ("for_gated", "for i in [1] do\n  puts i\nend\n", "ForNode"),
     (
         "case_match_gated",
         "x = 1\ncase x\nin 1 then puts 1\nend\n",
         "CaseMatchNode",
+    ),
+    // Plain attribute writes gate on every frontend (no `gen_call_assign`
+    // in the backend yet); the reference compiles them.
+    (
+        "index_write_gated",
+        "a = [0]\na[0] = 1\n",
+        "attribute assignment",
+    ),
+    (
+        "attr_write_gated",
+        "class Box25w\n  attr_accessor :x\nend\nb = Box25w.new\nb.x = 1\n",
+        "attribute assignment",
     ),
 ];
 

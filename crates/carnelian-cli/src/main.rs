@@ -117,10 +117,10 @@ fn cmd_reference(input: &PathBuf, output: &PathBuf) -> i32 {
 }
 
 fn check_frontend(frontend: &str) -> Result<(), i32> {
-    if frontend == "prism" || frontend == "owned" {
+    if frontend == "prism" || frontend == "owned" || frontend == "mri" {
         Ok(())
     } else {
-        eprintln!("error: unknown frontend '{frontend}' (expected 'prism' or 'owned')");
+        eprintln!("error: unknown frontend '{frontend}' (expected 'prism', 'owned' or 'mri')");
         Err(2)
     }
 }
@@ -136,9 +136,21 @@ fn parse_errors_text(errors: &[carnelian_front_prism::ParseDiagnostic]) -> Strin
     text
 }
 
+fn mri_parse_errors_text(errors: &[carnelian_front_mri::ParseDiagnostic]) -> String {
+    let mut text = String::new();
+    for diagnostic in errors {
+        text.push_str(&format!(
+            "error: {} ({}:{})\n",
+            diagnostic.message, diagnostic.start, diagnostic.end
+        ));
+    }
+    text
+}
+
 /// Compile source with the selected frontend: `prism` uses the borrowed
-/// FFI tree directly, `owned` lowers it to the owned AST first. Both feed
-/// the same generic backend, so bytes must agree.
+/// FFI tree directly, `owned` lowers it to the owned AST first, `mri`
+/// parses with the pure-Rust grammar and runs its end-to-end pipeline.
+/// All feed the same generic backend, so bytes must agree.
 fn compile_source(
     frontend: &str,
     source: &str,
@@ -166,6 +178,15 @@ fn compile_source(
                 pool: &pool,
             };
             carnelian_compiler::compile_tree(owned, opts)
+                .map_err(|diagnostics| format!("{diagnostics}"))
+        }
+        "mri" => {
+            let parsed = carnelian_front_mri::parse(source.as_bytes());
+            let errors = parsed.errors();
+            if !errors.is_empty() {
+                return Err(mri_parse_errors_text(&errors));
+            }
+            carnelian_front_mri::compile(source, opts)
                 .map_err(|diagnostics| format!("{diagnostics}"))
         }
         _ => unreachable!("frontend checked by the caller"),
