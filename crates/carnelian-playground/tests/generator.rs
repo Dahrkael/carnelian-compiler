@@ -65,7 +65,17 @@ fn page_is_self_contained() {
     emit_static(&dir, &manifest).expect("emit");
     let page = fs::read_to_string(dir.join("index.html")).expect("read index");
     let app = fs::read_to_string(dir.join("app.js")).expect("read app.js");
-    for token in ["{{", "}}", "http://", "https://", "cdn", "fetch("] {
+    // Plain href links are fine; only resource loads would break offline use.
+    for token in [
+        "{{",
+        "}}",
+        "<script src=\"http",
+        "<script src='http",
+        "rel=\"stylesheet\"",
+        "@import",
+        "cdn",
+        "fetch(",
+    ] {
         assert!(!page.contains(token), "index free of {token}");
     }
     for token in ["https://", "cdn", "fetch("] {

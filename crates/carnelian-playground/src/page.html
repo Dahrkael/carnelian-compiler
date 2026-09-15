@@ -1,50 +1,49 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Carnelian Playground (offline)</title>
-<style>
-body { font-family: system-ui, sans-serif; margin: 0 auto; max-width: 160em; padding: 1em; }
-.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(36em, 1fr)); gap: 0.6em; }
-.col { border: 1px solid #888; padding: 0.6em; min-width: 0; }
-.col h2 { margin: 0 0 0.4em; font-size: 1em; }
-#editor { width: 100%; height: 24em; font-family: monospace; font-size: 12px; box-sizing: border-box; }
-pre { background: #f4f4f4; padding: 0.6em; overflow: auto; white-space: pre; font-size: 12px; }
-pre.wrap { white-space: pre-wrap; }
-.diag-err { color: #a00; }
-.diag-ok { color: #070; }
-details.ast summary { cursor: pointer; font-family: monospace; }
-details.ast { margin-left: 1.2em; }
-footer { margin-top: 1.2em; font-size: 0.8em; color: #333; }
-footer span { margin-right: 1em; }
-.about { font-size: 0.85em; color: #333; }
-.row { display: flex; gap: 0.5em; align-items: center; flex-wrap: wrap; margin: 0.4em 0; }
-button:disabled { opacity: 0.45; }
-</style>
-</head>
-<body>
-<h1>Carnelian Playground <small>(offline)</small></h1>
-<div class="about">
-<p>Writes Ruby (MRI grammar 3.1.2) and compiles it in-browser to
-mruby bytecode (<b>RITE0400</b>: sections <b>IREP</b> with instructions,
-constant pool and symbol table). Press <b>Compile</b> to fill the AST and
-bytecode views, then <b>Run</b> to execute. Library versions below.</p>
-</div>
-<div class="row">
-<label for="example">Example:</label>
-<select id="example"></select>
-<button id="btn-compile">Compile</button>
-<button id="btn-run" disabled>Run</button>
-<span id="wasm-state">loading wasm…</span>
-</div>
-<div class="cols">
-<div class="col"><h2>Source</h2><textarea id="editor" spellcheck="false">{{DEFAULT_SOURCE}}</textarea></div>
-<div class="col"><h2>AST</h2><div id="ast"></div><pre id="ast-debug" class="wrap"></pre></div>
-<div class="col"><h2>Bytecode</h2><pre id="disasm"></pre></div>
-<div class="col"><h2>Console</h2><pre id="console" class="wrap"></pre></div>
-</div>
-<footer>{{PINS_FOOTER}}</footer>
-<script type="module" src="app.js"></script>
-</body>
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1">
+		<title>Carnelian Playground</title>
+		<style>
+			body { font-family: system-ui, sans-serif; margin: 0 auto; max-width: 160em; padding: 1em; }
+			.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(36em, 1fr)); gap: 0.6em; }
+			.col { border: 1px solid #888; padding: 0.6em; min-width: 0; }
+			.col h2 { margin: 0 0 0.4em; font-size: 1em; }
+			#editor { width: 100%; height: 24em; font-family: monospace; font-size: 12px; box-sizing: border-box; }
+			pre { background: #f4f4f4; padding: 0.6em; overflow: auto; white-space: pre; font-size: 12px; }
+			pre.wrap { white-space: pre-wrap; }
+			#ast, #disasm, #console { max-height: 70vh; overflow: auto; }
+			.diag-err { color: #a00; }
+			.diag-ok { color: #070; }
+			details.ast summary { cursor: pointer; font-family: monospace; }
+			details.ast { margin-left: 1.2em; }
+			footer { margin-top: 1.2em; font-size: 0.8em; color: #333; }
+			footer span { margin-right: 1em; }
+			.about { font-size: 0.85em; color: #333; }
+			.row { display: flex; gap: 0.5em; align-items: center; flex-wrap: wrap; margin: 0.4em 0; }
+			button:disabled { opacity: 0.45; }
+		</style>
+	</head>
+	<body>
+		<h1>Carnelian Playground <small></small></h1>
+		<div class="about">
+			<p><b>Carnelian</b> is an mruby compiler backend written in pure Rust with support for <a href="https://github.com/ruby/prism" target="_blank">Prism</a>, <a href="https://github.com/lib-ruby-parser/lib-ruby-parser" target="_blank">lib-ruby-parser</ and soon its own Prism Rust port.</p>
+			<p>This playground uses the <b>lib-ruby-parser</b> frontend and the <a href="https://github.com/mrubyedge/mrubyedge" target="_blank">mrubyedge</a> interpreter for a 100% Rust WASM executable with no clang nor Emscripten dependencies that compiles and runs ruby code locally in your browser (MRI grammar 3.1.2)</p>
+		</div>
+		<div class="row">
+			<label for="example">Example:</label>
+			<select id="example"></select>
+			<button id="btn-compile">Compile</button>
+			<button id="btn-run" disabled>Run</button>
+			<span id="wasm-state">loading wasm…</span>
+		</div>
+		<div class="cols">
+			<div class="col"><h2>Source</h2><textarea id="editor" spellcheck="false">{{DEFAULT_SOURCE}}</textarea></div>
+			<div class="col"><h2>AST</h2><div id="ast"></div><pre id="ast-debug" class="wrap"></pre></div>
+			<div class="col"><h2>Bytecode</h2><pre id="disasm"></pre></div>
+			<div class="col"><h2>Console</h2><pre id="console" class="wrap"></pre></div>
+		</div>
+		<footer>{{PINS_FOOTER}}</footer>
+		<script type="module" src="app.js"></script>
+	</body>
 </html>
