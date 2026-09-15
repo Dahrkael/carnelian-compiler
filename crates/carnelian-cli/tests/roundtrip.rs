@@ -4,15 +4,18 @@
 
 use std::process::Command;
 
+#[cfg(feature = "reference")]
 #[path = "corpus.rs"]
 mod corpus;
 
+#[cfg(feature = "reference")]
 use corpus::ROUNDTRIP_SNIPPETS as SNIPPETS;
 
 fn carnelian() -> Command {
     Command::new(env!("CARGO_BIN_EXE_carnelian"))
 }
 
+#[cfg(feature = "reference")]
 #[test]
 fn reference_and_verify_are_byte_identical() {
     let binary = env!("CARGO_BIN_EXE_carnelian");
@@ -66,7 +69,7 @@ fn reference_and_verify_are_byte_identical() {
 fn cli_exit_codes() {
     let dir = tempfile::tempdir().expect("tempdir");
 
-    // `compile --frontend prism` emits the program (exit 0).
+    // `compile` with the default frontend emits the program (exit 0).
     let input = dir.path().join("ok.rb");
     let output = dir.path().join("ok.mrb");
     std::fs::write(&input, "puts 1\n").expect("write");
@@ -87,28 +90,33 @@ fn cli_exit_codes() {
 
     // `compile --frontend owned` matches `prism` byte for byte (exit 0).
     let owned_out = dir.path().join("ok.owned.mrb");
-    let owned = carnelian()
-        .arg("compile")
-        .arg(&input)
-        .arg("-o")
-        .arg(&owned_out)
-        .arg("--frontend")
-        .arg("owned")
-        .output()
-        .expect("run owned compile");
-    assert_eq!(
-        owned.status.code(),
-        Some(0),
-        "owned compile failed: {}",
-        String::from_utf8_lossy(&owned.stderr)
-    );
-    assert_eq!(
-        std::fs::read(&output).expect("read prism output"),
-        std::fs::read(&owned_out).expect("read owned output"),
-        "owned diverges from prism"
-    );
+    #[cfg(feature = "prism")]
+    {
+        let owned = carnelian()
+            .arg("compile")
+            .arg(&input)
+            .arg("-o")
+            .arg(&owned_out)
+            .arg("--frontend")
+            .arg("owned")
+            .output()
+            .expect("run owned compile");
+        assert_eq!(
+            owned.status.code(),
+            Some(0),
+            "owned compile failed: {}",
+            String::from_utf8_lossy(&owned.stderr)
+        );
+        assert_eq!(
+            std::fs::read(&output).expect("read prism output"),
+            std::fs::read(&owned_out).expect("read owned output"),
+            "owned diverges from prism"
+        );
+    }
 
-    // `compile --frontend mri` matches `prism` byte for byte (exit 0).
+    // `compile --frontend mri` succeeds (exit 0) and matches the default
+    // frontend byte for byte. In pure builds the default is mri itself,
+    // so the cross-frontend comparison only runs with prism linked.
     let mri_out = dir.path().join("ok.mri.mrb");
     let mri = carnelian()
         .arg("compile")
@@ -125,8 +133,9 @@ fn cli_exit_codes() {
         "mri compile failed: {}",
         String::from_utf8_lossy(&mri.stderr)
     );
+    #[cfg(feature = "prism")]
     assert_eq!(
-        std::fs::read(&output).expect("read prism output"),
+        std::fs::read(&output).expect("read default output"),
         std::fs::read(&mri_out).expect("read mri output"),
         "mri diverges from prism"
     );
@@ -157,17 +166,20 @@ fn cli_exit_codes() {
     assert_eq!(bad_compile.status.code(), Some(1));
 
     // Broken source fails the C reference with exit 1.
-    let bad = dir.path().join("bad.rb");
-    let bad_out = dir.path().join("bad.mrb");
-    std::fs::write(&bad, "def (\n").expect("write");
-    let reference = carnelian()
-        .arg("reference")
-        .arg(&bad)
-        .arg("-o")
-        .arg(&bad_out)
-        .output()
-        .expect("run bad reference");
-    assert_eq!(reference.status.code(), Some(1));
+    #[cfg(feature = "reference")]
+    {
+        let bad = dir.path().join("bad.rb");
+        let bad_out = dir.path().join("bad.mrb");
+        std::fs::write(&bad, "def (\n").expect("write");
+        let reference = carnelian()
+            .arg("reference")
+            .arg(&bad)
+            .arg("-o")
+            .arg(&bad_out)
+            .output()
+            .expect("run bad reference");
+        assert_eq!(reference.status.code(), Some(1));
+    }
 
     // `--pins` prints the tuple and exits 0.
     let pins = carnelian().arg("--pins").output().expect("run --pins");

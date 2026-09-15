@@ -3,6 +3,8 @@
 //! both strip modes. Exit `0` required. Top-level `yield` stays gated as a
 //! diagnostic, never as diverging bytes.
 
+#![cfg(all(feature = "reference", feature = "prism"))]
+
 use std::process::Command;
 
 #[path = "corpus.rs"]

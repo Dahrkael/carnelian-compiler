@@ -6,6 +6,8 @@
 //! back-reference reads and chain links that hit still-gated call forms stay
 //! gated for the same reason.
 
+#![cfg(all(feature = "reference", feature = "prism"))]
+
 use std::process::Command;
 
 #[path = "corpus.rs"]

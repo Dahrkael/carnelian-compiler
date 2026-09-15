@@ -4,6 +4,8 @@
 //! reads belong to other tranches and are locked as diagnostics below, never
 //! as diverging bytes.
 
+#![cfg(all(feature = "reference", feature = "prism"))]
+
 use std::process::Command;
 
 #[path = "corpus.rs"]

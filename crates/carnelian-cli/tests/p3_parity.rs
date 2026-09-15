@@ -4,15 +4,19 @@
 //! frontends. Needs the P3.1 lowering and the P3.2 `BackendNode` impl; until
 //! those land the owned comparisons fail.
 
+#[cfg(all(feature = "reference", feature = "prism"))]
 #[path = "corpus.rs"]
 mod corpus;
 
+#[cfg(all(feature = "reference", feature = "prism"))]
 use std::process::Command;
 
+#[cfg(all(feature = "reference", feature = "prism"))]
 fn carnelian() -> Command {
     Command::new(env!("CARGO_BIN_EXE_carnelian"))
 }
 
+#[cfg(all(feature = "reference", feature = "prism"))]
 fn first_divergence(a: &[u8], b: &[u8]) -> Option<usize> {
     for (index, (x, y)) in a.iter().zip(b.iter()).enumerate() {
         if x != y {
@@ -25,6 +29,7 @@ fn first_divergence(a: &[u8], b: &[u8]) -> Option<usize> {
     None
 }
 
+#[cfg(all(feature = "reference", feature = "prism"))]
 fn reference_bytes(name: &str, source: &str, dir: &std::path::Path) -> Vec<u8> {
     let input = dir.join(format!("{name}.rb"));
     std::fs::write(&input, source).expect("write snippet");
@@ -44,6 +49,7 @@ fn reference_bytes(name: &str, source: &str, dir: &std::path::Path) -> Vec<u8> {
     std::fs::read(&golden).expect("read golden")
 }
 
+#[cfg(all(feature = "reference", feature = "prism"))]
 fn compile_bytes(
     name: &str,
     source: &str,
@@ -75,6 +81,7 @@ fn compile_bytes(
     std::fs::read(&out).expect("read output")
 }
 
+#[cfg(all(feature = "reference", feature = "prism"))]
 fn check_parity(origin: &str, name: &str, source: &str) {
     let scoped = format!("{origin}_{name}");
     let dir = tempfile::tempdir().expect("tempdir");
@@ -97,6 +104,7 @@ fn check_parity(origin: &str, name: &str, source: &str) {
     }
 }
 
+#[cfg(all(feature = "reference", feature = "prism"))]
 fn check_gated(origin: &str, name: &str, source: &str, marker: &str) {
     for frontend in ["prism", "owned"] {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -125,6 +133,7 @@ fn check_gated(origin: &str, name: &str, source: &str, marker: &str) {
     }
 }
 
+#[cfg(all(feature = "reference", feature = "prism"))]
 #[test]
 fn p3_parity_is_identical() {
     for (name, source) in corpus::P1_SNIPPETS {
@@ -152,6 +161,7 @@ fn p3_parity_is_identical() {
     }
 }
 
+#[cfg(all(feature = "reference", feature = "prism"))]
 #[test]
 fn p3_gated_agreement() {
     for (name, source, marker) in corpus::P2_GATED {

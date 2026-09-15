@@ -13,15 +13,19 @@
 //! (front-mri is pure Rust); the host smoke below runs the same
 //! `front_mri::compile` on the host and pins the `puts 1` bytes.
 
+#[cfg(feature = "prism")]
 #[path = "corpus.rs"]
 mod corpus;
 
+#[cfg(feature = "prism")]
 use std::process::Command;
 
+#[cfg(feature = "prism")]
 fn carnelian() -> Command {
     Command::new(env!("CARGO_BIN_EXE_carnelian"))
 }
 
+#[cfg(all(feature = "reference", feature = "prism"))]
 fn first_divergence(a: &[u8], b: &[u8]) -> Option<usize> {
     for (index, (x, y)) in a.iter().zip(b.iter()).enumerate() {
         if x != y {
@@ -34,6 +38,7 @@ fn first_divergence(a: &[u8], b: &[u8]) -> Option<usize> {
     None
 }
 
+#[cfg(all(feature = "reference", feature = "prism"))]
 fn reference_bytes(name: &str, source: &str, dir: &std::path::Path) -> Vec<u8> {
     let input = dir.join(format!("{name}.rb"));
     std::fs::write(&input, source).expect("write snippet");
@@ -53,6 +58,7 @@ fn reference_bytes(name: &str, source: &str, dir: &std::path::Path) -> Vec<u8> {
     std::fs::read(&golden).expect("read golden")
 }
 
+#[cfg(all(feature = "reference", feature = "prism"))]
 fn compile_bytes(
     name: &str,
     source: &str,
@@ -84,6 +90,7 @@ fn compile_bytes(
     std::fs::read(&out).expect("read output")
 }
 
+#[cfg(feature = "prism")]
 fn compile_output(
     name: &str,
     source: &str,
@@ -107,10 +114,12 @@ fn compile_output(
 /// Corpus pairs the MRI frontend cannot cover with byte identity:
 /// `it` is past the 3.1.2 grammar ceiling (gated at parse per the P4
 /// contract; the old grammar would read it as a plain send).
+#[cfg(all(feature = "reference", feature = "prism"))]
 fn mri_excluded(origin: &str, name: &str) -> bool {
     matches!((origin, name), ("p23", "it_block"))
 }
 
+#[cfg(all(feature = "reference", feature = "prism"))]
 fn check_parity_4way(origin: &str, name: &str, source: &str) {
     let scoped = format!("{origin}_{name}");
     let dir = tempfile::tempdir().expect("tempdir");
@@ -142,6 +151,7 @@ fn check_parity_4way(origin: &str, name: &str, source: &str) {
 /// locus (Prism rejects at parse, MRI reaches the backend gate, or vice
 /// versa). Bare `yield` is the shape: Prism errors `Invalid yield` while
 /// parsing, MRI parses it and the shared backend reports `invalid yield`.
+#[cfg(feature = "prism")]
 fn mri_marker<'a>(origin: &str, name: &str, marker: &'a str) -> &'a str {
     match (origin, name) {
         ("p23", "yield_naked") | ("p23", "yield_args") => "invalid yield",
@@ -149,6 +159,7 @@ fn mri_marker<'a>(origin: &str, name: &str, marker: &'a str) -> &'a str {
     }
 }
 
+#[cfg(feature = "prism")]
 fn check_gated_3way(origin: &str, name: &str, source: &str, marker: &str) {
     for frontend in ["prism", "owned", "mri"] {
         let expected = if frontend == "mri" {
@@ -174,6 +185,7 @@ fn check_gated_3way(origin: &str, name: &str, source: &str, marker: &str) {
 /// Post-3.1.2 syntax: `mri` fails at parse (exit 1 with a diagnostic)
 /// while prism/owned keep passing. `bar(*)`/`bar(**)` anonymous forwarding
 /// is Ruby 3.2 (the pinned 3.1.2 grammar rejects it); `it` is Ruby 3.4.
+#[cfg(feature = "prism")]
 const MRI_CEILING: &[(&str, &str)] = &[
     ("it_param", "puts [1, 2].map { it + 1 }\n"),
     ("it_param_in_def", "def f\n  [1].each { it }\nend\n"),
@@ -190,6 +202,7 @@ const MRI_CEILING: &[(&str, &str)] = &[
 /// Scope vectors for the upvar pass: nested capture depths, shadowing at
 /// each level, sibling blocks, block-locals, deep writes and a def
 /// boundary. All pass under prism/owned/reference today.
+#[cfg(all(feature = "reference", feature = "prism"))]
 const SCOPE_SNIPPETS: &[(&str, &str)] = &[
     (
         "nested_3deep",
@@ -217,9 +230,10 @@ const SCOPE_SNIPPETS: &[(&str, &str)] = &[
     ),
 ];
 
-/// `for` loops live in the shared corpus (`P25_SNIPPETS`) now that the
-/// backend `gen_for` covers all frontends (4-way via the P25 table).
+// `for` loops live in the shared corpus (`P25_SNIPPETS`) now that the
+// backend `gen_for` covers all frontends (4-way via the P25 table).
 
+#[cfg(all(feature = "reference", feature = "prism"))]
 #[test]
 fn p4_parity_is_identical() {
     // 315 table snippets minus the `it` ceiling exclusion, plus the 7
@@ -245,6 +259,7 @@ fn p4_parity_is_identical() {
     }
 }
 
+#[cfg(feature = "prism")]
 #[test]
 fn p4_gated_agreement() {
     // Backend gates fail with the same marker under all three frontends
@@ -262,6 +277,7 @@ fn p4_gated_agreement() {
     }
 }
 
+#[cfg(feature = "prism")]
 #[test]
 fn mri_grammar_ceiling_gates() {
     for (name, source) in MRI_CEILING {
@@ -290,6 +306,7 @@ fn mri_grammar_ceiling_gates() {
     }
 }
 
+#[cfg(all(feature = "reference", feature = "prism"))]
 #[test]
 fn mri_scope_vectors() {
     for (name, source) in SCOPE_SNIPPETS {

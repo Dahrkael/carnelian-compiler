@@ -35,10 +35,12 @@ enum Command {
         #[arg(long)]
         strip: bool,
         /// Frontend selector.
-        #[arg(long, default_value = "prism")]
+        #[cfg_attr(feature = "prism", arg(long, default_value = "prism"))]
+        #[cfg_attr(not(feature = "prism"), arg(long, default_value = "mri"))]
         frontend: String,
     },
     /// Emit the pinned C reference golden (`mruby-compiler2 0.5.0`, dev only).
+    #[cfg(feature = "reference")]
     Reference {
         /// Source file (`-` reads stdin).
         input: PathBuf,
@@ -48,11 +50,13 @@ enum Command {
     },
     /// Compare `compile` against `reference`, byte for byte, in both strip
     /// modes (both must match the same flags-`0` golden).
+    #[cfg(feature = "reference")]
     Verify {
         /// Source file (`-` reads stdin).
         input: PathBuf,
         /// Frontend selector.
-        #[arg(long, default_value = "prism")]
+        #[cfg_attr(feature = "prism", arg(long, default_value = "prism"))]
+        #[cfg_attr(not(feature = "prism"), arg(long, default_value = "mri"))]
         frontend: String,
     },
 }
@@ -70,6 +74,7 @@ fn read_input(path: &PathBuf) -> Result<String, String> {
     }
 }
 
+#[cfg(feature = "reference")]
 fn reference_bytes(source: &str) -> Result<Vec<u8>, String> {
     // SAFETY: single-threaded dev-only use of the pinned C compiler.
     unsafe {
@@ -80,6 +85,7 @@ fn reference_bytes(source: &str) -> Result<Vec<u8>, String> {
     }
 }
 
+#[cfg(feature = "reference")]
 fn first_divergence(a: &[u8], b: &[u8]) -> Option<usize> {
     for (index, (x, y)) in a.iter().zip(b.iter()).enumerate() {
         if x != y {
@@ -92,6 +98,7 @@ fn first_divergence(a: &[u8], b: &[u8]) -> Option<usize> {
     None
 }
 
+#[cfg(feature = "reference")]
 fn cmd_reference(input: &PathBuf, output: &PathBuf) -> i32 {
     let source = match read_input(input) {
         Ok(source) => source,
@@ -117,14 +124,28 @@ fn cmd_reference(input: &PathBuf, output: &PathBuf) -> i32 {
 }
 
 fn check_frontend(frontend: &str) -> Result<(), i32> {
-    if frontend == "prism" || frontend == "owned" || frontend == "mri" {
-        Ok(())
-    } else {
+    if frontend == "mri" {
+        return Ok(());
+    }
+    #[cfg(feature = "prism")]
+    if frontend == "prism" || frontend == "owned" {
+        return Ok(());
+    }
+    #[cfg(feature = "prism")]
+    {
         eprintln!("error: unknown frontend '{frontend}' (expected 'prism', 'owned' or 'mri')");
+        Err(2)
+    }
+    #[cfg(not(feature = "prism"))]
+    {
+        eprintln!(
+            "error: unknown frontend '{frontend}' (expected 'mri'; this build has no prism support, use --frontend mri)"
+        );
         Err(2)
     }
 }
 
+#[cfg(feature = "prism")]
 fn parse_errors_text(errors: &[carnelian_front_prism::ParseDiagnostic]) -> String {
     let mut text = String::new();
     for diagnostic in errors {
@@ -157,6 +178,7 @@ fn compile_source(
     opts: &carnelian_compiler::CompileOptions,
 ) -> Result<Vec<u8>, String> {
     match frontend {
+        #[cfg(feature = "prism")]
         "prism" => {
             let parsed = carnelian_front_prism::parse(source.as_bytes());
             let errors = parsed.errors();
@@ -166,6 +188,7 @@ fn compile_source(
             carnelian_compiler::compile_tree(parsed.root(), opts)
                 .map_err(|diagnostics| format!("{diagnostics}"))
         }
+        #[cfg(feature = "prism")]
         "owned" => {
             let parsed = carnelian_front_prism::parse(source.as_bytes());
             let errors = parsed.errors();
@@ -193,6 +216,7 @@ fn compile_source(
     }
 }
 
+#[cfg(feature = "reference")]
 fn cmd_verify(input: &PathBuf, frontend: &str) -> i32 {
     if let Err(code) = check_frontend(frontend) {
         return code;
@@ -287,7 +311,10 @@ fn main() {
             if cli.pins {
                 0
             } else {
+                #[cfg(feature = "reference")]
                 eprintln!("error: missing subcommand (compile|reference|verify) or --pins");
+                #[cfg(not(feature = "reference"))]
+                eprintln!("error: missing subcommand (compile) or --pins");
                 2
             }
         }
@@ -297,7 +324,9 @@ fn main() {
             strip,
             frontend,
         }) => cmd_compile(input, output, *strip, frontend),
+        #[cfg(feature = "reference")]
         Some(Command::Reference { input, output }) => cmd_reference(input, output),
+        #[cfg(feature = "reference")]
         Some(Command::Verify { input, frontend }) => cmd_verify(input, frontend),
     };
     std::process::exit(code);

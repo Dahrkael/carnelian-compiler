@@ -1,6 +1,8 @@
 //! P1 certification: `verify` compares `compile --frontend prism` against the
 //! pinned C golden, byte for byte, in both strip modes. Exit `0` required.
 
+#![cfg(all(feature = "reference", feature = "prism"))]
+
 use std::process::Command;
 
 #[path = "corpus.rs"]

@@ -4,6 +4,8 @@
 //! symbols belong to later tranches and are locked as diagnostics below,
 //! never as diverging bytes. Keyword hashes in call arguments opened in P2.5.
 
+#![cfg(all(feature = "reference", feature = "prism"))]
+
 use std::process::Command;
 
 #[path = "corpus.rs"]
