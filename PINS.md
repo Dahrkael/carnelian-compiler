@@ -17,5 +17,4 @@ A CI pin test fails if the locked reference versions differ from this file.
 
 ## Compatibility changelog
 
-- `0.1.0` (unreleased, P0): initial tuple. Writer round-trip only, no codegen yet.
-- `0.1.0` (unreleased, P4): add the MRI parser pin (pure-Rust frontend, grammar ceiling 3.1.2).
+- `0.1.0` (released 2026-09-15, tag `v0.1.0`): P0–P4 + P2.6 pattern matching + DEBUG section + deferred call threading. Initial tuple (P0); MRI parser pin added in P4.
