@@ -1,24 +1,12 @@
 // Carnelian playground UI: vanilla JS, no dependencies, no network.
-// Curated examples (with host-baked outputs) are inlined below.
+// Examples carry name and source only; everything compiles ad-hoc.
 const EXAMPLES = {{EXAMPLES_JSON}};
 
 import init, * as pg from './playground.js';
 
 const $ = (id) => document.getElementById(id);
 let wasmReady = false;
-
-function showTab(name) {
-  for (const el of document.querySelectorAll('.tabs button')) {
-    el.classList.toggle('active', el.dataset.tab === name);
-  }
-  for (const el of document.querySelectorAll('.tab')) {
-    el.classList.toggle('active', el.id === 'tab-' + name);
-  }
-}
-
-for (const el of document.querySelectorAll('.tabs button')) {
-  el.addEventListener('click', () => showTab(el.dataset.tab));
-}
+let compiledOk = false;
 
 // Byte offset (UTF-8) to UTF-16 code-unit index for textarea selection.
 function byteToChar(source, byteOffset) {
@@ -52,9 +40,9 @@ function byteToLineCol(source, byteOffset) {
   return [line, col];
 }
 
-function printConsole(lines) {
-  $('console').textContent = lines.join('\n');
-  showTab('console');
+function setRunEnabled(enabled) {
+  compiledOk = enabled;
+  $('btn-run').disabled = !enabled;
 }
 
 function currentExample() {
@@ -77,7 +65,11 @@ function fillExamples() {
   }
   sel.addEventListener('change', () => {
     const ex = currentExample();
-    if (ex) $('editor').value = ex.source;
+    if (ex) {
+      $('editor').value = ex.source;
+      setRunEnabled(false);
+      $('console').textContent = '';
+    }
   });
   if (EXAMPLES.length > 0) {
     sel.value = EXAMPLES[0].name;
@@ -87,7 +79,7 @@ function fillExamples() {
 
 function requireWasm() {
   if (!wasmReady) {
-    printConsole(['wasm module not ready yet; serve dist/ over http and reload.']);
+    $('console').textContent = 'wasm module not ready yet; serve dist/ over http and reload.';
     return false;
   }
   return true;
@@ -96,38 +88,6 @@ function requireWasm() {
 function compileInBrowser(source) {
   return JSON.parse(pg.pg_compile(source));
 }
-
-$('btn-run').addEventListener('click', () => {
-  if (!requireWasm()) return;
-  const source = $('editor').value;
-  const compiled = compileInBrowser(source);
-  const lines = [];
-  if (compiled.diags.length > 0) {
-    for (const d of compiled.diags) {
-      const [line, col] = byteToLineCol(source, d.start);
-      lines.push(`error ${line}:${col}: ${d.message}`);
-    }
-    const first = compiled.diags[0];
-    const ed = $('editor');
-    ed.focus();
-    ed.setSelectionRange(byteToChar(source, first.start), byteToChar(source, first.end));
-    printConsole(lines);
-    return;
-  }
-  const ran = JSON.parse(pg.pg_run(source));
-  if (!ran.ok) {
-    printConsole(['run failed: ' + ran.error]);
-    return;
-  }
-  lines.push('--- stdout ---');
-  lines.push(ran.stdout === '' ? '(empty)' : ran.stdout.replace(/\n$/, ''));
-  lines.push('--- return ---');
-  lines.push(ran.result);
-  lines.push(`--- bytes: ${compiled.byte_len} ---`);
-  $('disasm').textContent = compiled.disasm;
-  renderAst(compiled.ast, compiled.ast_debug);
-  printConsole(lines);
-});
 
 function renderAst(ast, astDebug) {
   const host = $('ast');
@@ -149,58 +109,53 @@ function renderAst(ast, astDebug) {
     host.textContent = 'AST render failed: ' + e;
   }
   $('ast-debug').textContent = astDebug;
-  showTab('ast');
 }
 
-$('btn-ast').addEventListener('click', () => {
+$('btn-compile').addEventListener('click', () => {
   if (!requireWasm()) return;
   const source = $('editor').value;
   const compiled = compileInBrowser(source);
   if (compiled.diags.length > 0) {
-    $('btn-run').click();
-    return;
-  }
-  renderAst(compiled.ast, compiled.ast_debug);
-});
-
-$('btn-dis').addEventListener('click', () => {
-  if (!requireWasm()) return;
-  const source = $('editor').value;
-  const compiled = compileInBrowser(source);
-  if (compiled.diags.length > 0) {
-    $('btn-run').click();
+    const lines = [];
+    for (const d of compiled.diags) {
+      const [line, col] = byteToLineCol(source, d.start);
+      lines.push(`error ${line}:${col}: ${d.message}`);
+    }
+    const first = compiled.diags[0];
+    const ed = $('editor');
+    ed.focus();
+    ed.setSelectionRange(byteToChar(source, first.start), byteToChar(source, first.end));
+    $('console').textContent = lines.join('\n');
+    $('ast').textContent = '';
+    $('ast-debug').textContent = '';
+    $('disasm').textContent = '';
+    setRunEnabled(false);
     return;
   }
   $('disasm').textContent = compiled.disasm;
-  showTab('bytecode');
+  renderAst(compiled.ast, compiled.ast_debug);
+  $('console').textContent = `compiled ok (${compiled.byte_len} bytes). Press Run.`;
+  setRunEnabled(true);
 });
 
-function hexOf(bytes) {
-  return Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-$('btn-verify').addEventListener('click', () => {
-  if (!requireWasm()) return;
-  const ex = currentExample();
-  if (!ex) {
-    printConsole(['verify needs a curated example; ad-hoc code has no host reference in-browser.']);
-    return;
-  }
+$('btn-run').addEventListener('click', () => {
+  if (!requireWasm() || !compiledOk) return;
   const source = $('editor').value;
-  const compiled = compileInBrowser(source);
-  if (compiled.diags.length > 0) {
-    printConsole(['verify: source does not compile.']);
+  const ran = JSON.parse(pg.pg_run(source));
+  if (!ran.ok) {
+    $('console').textContent = 'run failed: ' + ran.error;
     return;
   }
-  const localHex = hexOf(pg.pg_bytes(source));
-  const lines = [`example: ${ex.name}`, `local bytes: ${compiled.byte_len}`];
-  if (source !== ex.source) {
-    lines.push('note: editor differs from the curated source; comparing against baked host bytes anyway.');
-  }
-  lines.push(localHex === ex.hex
-    ? 'verify: byte-identical to host build'
-    : 'verify: DIFFERS from host build');
-  printConsole(lines);
+  const lines = [];
+  lines.push('--- stdout ---');
+  lines.push(ran.stdout === '' ? '(empty)' : ran.stdout.replace(/\n$/, ''));
+  lines.push('--- return ---');
+  lines.push(ran.result);
+  $('console').textContent = lines.join('\n');
+});
+
+$('editor').addEventListener('input', () => {
+  setRunEnabled(false);
 });
 
 fillExamples();

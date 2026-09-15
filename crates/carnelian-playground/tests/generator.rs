@@ -79,8 +79,8 @@ fn page_is_self_contained() {
             fs::read_to_string(dir.join(format!("examples/{}.rb", example.name))).expect("copy");
         assert_eq!(copied, example.source, "example {} copied", example.name);
         assert!(
-            app.contains(&example.hex),
-            "host bytes baked for {}",
+            app.contains(&format!("\"name\":\"{}\"", example.name)),
+            "example {} manifest inlined",
             example.name
         );
     }

@@ -1,33 +1,26 @@
 //! Static site writer: self-contained offline `dist/`.
 //!
-//! `emit_static` renders `index.html` (editor + AST + bytecode + console
-//! tabs, pins footer from `PINS.md`), `app.js` (vanilla, no deps, curated
-//! examples inlined) and copies `examples/*.rb`. The wasm module is built
-//! separately by the generator binary (`cargo` + `wasm-bindgen` CLI).
+//! `emit_static` renders `index.html` (four-column editor/AST/bytecode/
+//! console layout, pins footer from `PINS.md`), `app.js` (vanilla, no
+//! deps, example sources inlined) and copies `examples/*.rb`. The wasm
+//! module is built separately by the generator binary (`cargo` +
+//! `wasm-bindgen` CLI).
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::disasm::disassemble;
-use crate::{compile_source, execute};
-use carnelian_compiler::read_rite;
+use crate::compile_source;
 
 const PAGE_TEMPLATE: &str = include_str!("page.html");
 const APP_TEMPLATE: &str = include_str!("app.js");
 
-/// One curated example with host-baked outputs.
+/// One curated example: file stem plus source for the dropdown.
 #[derive(Debug, Clone)]
 pub struct ExampleInfo {
     /// File stem (`hello`).
     pub name: String,
     /// Ruby source.
     pub source: String,
-    /// Expected captured stdout.
-    pub stdout: String,
-    /// Expected return `inspect`.
-    pub result: String,
-    /// Compiled RITE bytes as lowercase hex (host reference for verify).
-    pub hex: String,
 }
 
 /// Pins footer rows (`field`, `pin`) parsed from `PINS.md`.
@@ -70,7 +63,8 @@ pub fn read_pins() -> Result<Vec<(String, String)>, String> {
     Ok(rows)
 }
 
-/// Compile and execute every `examples/*.rb`, baking host outputs.
+/// Read every `examples/*.rb`, checking each one still compiles so the
+/// dropdown never loads broken code.
 pub fn collect_examples() -> Result<Vec<ExampleInfo>, String> {
     let dir = crate_dir().join("examples");
     let mut names: Vec<String> = fs::read_dir(&dir)
@@ -87,31 +81,14 @@ pub fn collect_examples() -> Result<Vec<ExampleInfo>, String> {
     for name in names {
         let source =
             fs::read_to_string(dir.join(&name)).map_err(|error| format!("read {name}: {error}"))?;
-        let bytes = compile_source(&source)
+        compile_source(&source)
             .map_err(|diags| format!("example {name} does not compile: {diags:?}"))?;
-        let outcome =
-            execute(&bytes).map_err(|error| format!("example {name} does not execute: {error}"))?;
-        let model = read_rite(&bytes).map_err(|error| format!("read back {name}: {error:?}"))?;
-        let _ = disassemble(&model);
         out.push(ExampleInfo {
             name: name.strip_suffix(".rb").unwrap_or(&name).to_string(),
             source,
-            stdout: outcome.stdout,
-            result: outcome.result,
-            hex: to_hex(&bytes),
         });
     }
     Ok(out)
-}
-
-fn to_hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(DIGITS[(byte >> 4) as usize] as char);
-        out.push(DIGITS[(byte & 0x0f) as usize] as char);
-    }
-    out
 }
 
 /// Escape a string for JSON double quotes.
@@ -139,12 +116,9 @@ pub fn manifest_json(examples: &[ExampleInfo]) -> String {
             out.push(',');
         }
         out.push_str(&format!(
-            "{{\"name\":\"{}\",\"source\":\"{}\",\"stdout\":\"{}\",\"result\":\"{}\",\"hex\":\"{}\"}}",
+            "{{\"name\":\"{}\",\"source\":\"{}\"}}",
             json_escape(&example.name),
             json_escape(&example.source),
-            json_escape(&example.stdout),
-            json_escape(&example.result),
-            example.hex,
         ));
     }
     out.push(']');

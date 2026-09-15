@@ -68,14 +68,6 @@ pub fn pg_compile(source: &str) -> String {
     )
 }
 
-/// Raw compiled bytes for the in-browser verify comparison. Intentionally
-/// ungated: bytes and views never reach the VM, so bigints are harmless.
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen::prelude::wasm_bindgen]
-pub fn pg_bytes(source: &str) -> Vec<u8> {
-    compile_source(source).unwrap_or_default()
-}
-
 /// Compile and execute for the browser console.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
