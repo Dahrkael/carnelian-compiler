@@ -533,3 +533,66 @@ plus the `PINS.md` row and this note). Frozen contracts untouched:
   peephole/`lastpc` chains, wire widths, `unsafe`/FFI in shipping path,
   `split_keywords` scope, single debug encoder, `recv_ready` liveness,
   helper unification, `debug_start_pos` placeholder, front-MRI fixes.
+
+## Real-world basics, issue #2 (worktrees feature/realworld-flow + feature/realworld-assign, merged to dev)
+
+Client (downstream mruby engine) reported v0.1.0 compiles 2/32 real files:
+backend had no arms for `return`, `break`/`next`, ranges, parentheses,
+attribute assignment, op-assign — only `defined?` classification listed
+those kinds. Two parallel agents, split flow vs assignment, integrated
+A → B via patches (`master` untouched).
+
+- Flow (A): `Return/Break/Next/Redo/Range` views (`view.rs`, `Owned`,
+  `PrismNode`); ported `gen_return` (`PM_RETURN_NODE` :6760, `RETURN_BLK`
+  iff a loop frame is open else `RETURN`), `loop_break` (:1505) +
+  `PM_BREAK_NODE` (:6819), `PM_NEXT_NODE` (:6826), `PM_REDO_NODE`
+  (:6856), `PM_RANGE_NODE` (null sides code nil; bare `1..` as statement
+  is a Prism parse error on both sides, parenthesized/endless forms all
+  compile), `PM_PARENTHESES_NODE` (:6183) plus the `PM_ARGUMENTS_NODE`
+  gather `gen_retval` needs. Bonus: `case x in 1..3` compiles, so
+  `case_in_range_gated` became a live snippet. Deviation: omitted
+  `return_leaves_upper_p` (provably false under `MRC_TARGET_MRUBYC`).
+  28 snippets across P2/P23/P24/P25/P26 tables.
+- Assignment (B): lifted the `attr_write` gate; ported `gen_call_assign`
+  (:2482) + `attr_assign_simple_args` (:2590), scalar `OPERATOR_WRITE`
+  (:5157), `CALL_*_WRITE` (:5237), `INDEX_*_WRITE` (:5324),
+  `OR/AND_WRITE` (:5424, incl. the `@@x||=` rescue-read path),
+  `gen_binary_operator` (:4131), `gen_lvar` depth>0 leg (:4119);
+  `[]=`→`SETIDX` arm in `emit_call`; `gen_lvar` upvar loads (was a hard
+  error, all prior callers pass depth 0). New `Op/Logic/Call/IndexWrite`
+  views. 38 snippets (P24 scalar family, P25 index/call family).
+  Deviations: no separate `gen_values_upto` (existing `gen_values` on the
+  all-but-last slice is identical for diverted simple args); absent
+  call-write receiver treated as implicit-`self` like `gen_call` (C would
+  deref NULL; only producible via MRI, never observed).
+- Still gated with reference-probe evidence: `A::B += 1`
+  (`constant re-assignment`), `A::B ||=` / `&&=` (`Not implemented`), all
+  with 3-frontend agreement; `BEGIN`/`END` (reference rejects, per user
+  decision); bare-statement endless `1..` (parse error both sides).
+  Contrary to the issue's suspicion, bare `C += 1` is accepted by the
+  reference — ported live.
+- Exit state: workspace suite green (incl. 66 new snippets 4-way × both
+  modes), `clippy -D warnings` / `fmt` clean, `wasm32` pure-path check
+  passes. Client repros (`return`, `self.x = 1`, `x += 1`) verify
+  identical on all 3 frontends.
+
+## Reviewer round on real-world basics (4 risks declined with evidence, 4 lock-in snippets added)
+
+- `RETURN_BLK iff !loops.is_empty()`: FAITHFUL — C tests `if (s->loop
+  || return_leaves_upper_p(s))` (`codegen.c` `PM_RETURN_NODE`). Probes
+  `return`-in-`while`/`for` at method level verify identical; added as
+  `return_in_while` / `return_in_for` goldens.
+- `loop_break` valued-coding from innermost `reg`: FAITHFUL — C uses
+  `loop = s->loop` for the NOVAL/`gen_retval` choice, then walks past
+  BEGIN/RESCUE to the target. Probe `break`-in-`begin`-in-`while` verifies
+  identical; added as `break_in_begin` golden.
+- Index `||=`/`&&=` double `dispatch(pos)`: FAITHFUL — C dispatches twice
+  (`:5405` pre-send, `:5421` post-send), replicated verbatim; green
+  `index_or`/`index_and` goldens prove it. Untouched.
+- Index valued-`||=` MOVE peephole flag vs call path: probe `x =
+  (h[:a] ||= 1)` verifies identical; changing the flag would risk breaking
+  identity. Untouched; added as `index_or_valued` golden.
+- Suggestions left as follow-ups (all unproven byte risk, suite green):
+  `view.block` check in `attr_assign_simple_args`, shared
+  `gen_combined_rhs` tail, unified GET/SET opcode maps, dropping
+  `push_n(1); pop_n(1);` no-ops, one diagnostic constructor.

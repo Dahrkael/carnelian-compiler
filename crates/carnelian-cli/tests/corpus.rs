@@ -362,6 +362,10 @@ pub const P24_SNIPPETS: &[(&str, &str)] = &[
     ("return_toplevel", "return 1\n"),
     ("return_multi", "def f\n  return 1, 2\nend\nputs f\n"),
     ("return_splat", "def f(a)\n  return *a\nend\nputs f([1, 2])\n"),
+    // `RETURN_BLK` iff any loop frame is open (C tests `s->loop`); while,
+    // for and begin scaffolds all trigger it — locked by goldens.
+    ("return_in_while", "def f(c)\n  while c\n    return 1\n  end\nend\nputs f(true)\n"),
+    ("return_in_for", "def g(x)\n  for i in x do\n    return i\n  end\nend\nputs g([7])\n"),
 ];
 
 /// `GATED` table from `p24_defclass.rs`.
@@ -619,6 +623,11 @@ pub const P25_SNIPPETS: &[(&str, &str)] = &[
     ),
     ("index_op", "h = {}\nh[:a] = 0\nh[:a] += 1\nputs h[:a]\n"),
     ("index_or", "h = {}\nh[:a] ||= 1\nputs h[:a]\n"),
+    // Valued `||=` with a literal RHS (result-slot move path).
+    ("index_or_valued", "h = {}\nx = (h[:a] ||= 1)\nputs x\nputs h[:a]\n"),
+    // `break v` through a begin/rescue scaffold (innermost reg decides
+    // the value coding, like C's `loop = s->loop`).
+    ("break_in_begin", "x = nil\nwhile x.nil?\n  begin\n    break 5\n  rescue\n    6\n  end\nend\nputs x\n"),
     ("index_and", "h = {}\nh[:a] = true\nh[:a] &&= 2\nputs h[:a]\n"),
     ("index_multi", "h = {}\nh[1, 2] = 0\nh[1, 2] += 1\nputs h[1, 2]\n"),
     (
