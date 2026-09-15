@@ -1,0 +1,18 @@
+[package]
+name = "carnelian-playground"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Developer playground: static web page generator with script editor, AST and bytecode viewers, and an execution console"
+keywords = ["ruby", "mruby", "playground"]
+
+[[bin]]
+name = "playground"
+path = "src/main.rs"
+
+[dependencies]
+carnelian-ast = { workspace = true }
+carnelian-compiler = { workspace = true }
+carnelian-front-mri = { workspace = true }
+mrubyedge = { git = "https://github.com/Dahrkael/mrubyedge", tag = "v2.0.0-ng.2" }

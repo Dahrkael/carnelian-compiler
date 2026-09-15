@@ -5,6 +5,7 @@ members = [
     "crates/carnelian-front-prism",
     "crates/carnelian-front-mri",
     "crates/carnelian-cli",
+    "crates/carnelian-playground",
 ]
 resolver = "2"
 
@@ -18,3 +19,4 @@ carnelian-ast = { path = "crates/carnelian-ast" }
 carnelian-compiler = { path = "crates/carnelian-compiler" }
 carnelian-front-prism = { path = "crates/carnelian-front-prism" }
 carnelian-front-mri = { path = "crates/carnelian-front-mri" }
+carnelian-playground = { path = "crates/carnelian-playground" }
