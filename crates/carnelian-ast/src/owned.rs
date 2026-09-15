@@ -5,12 +5,12 @@
 
 use crate::view::{
     AlternationView, ArrayPatternView, BackendNode, BeginView, BlockParamView, BlockView,
-    CallTargetView, CallView, CaptureView, CaseMatchView, CaseView, ClassView, ConstPathRead,
-    ConstPathWrite, DefView, EnsureView, FindPatternView, ForView, GuardView, HashPatternView,
-    IfView, InView, IndexTargetView, IntegerLit, KeywordParamView, LambdaView, LvarRef, LvarWrite,
-    MatchView, ModuleView, MultiTargetView, MultiWriteView, ParamsView, ProgramView, RangeView,
-    RescueModifierView, RescueView, SclassView, SimpleLit, SuperView, VarWrite, WhenView,
-    WhileView, YieldView,
+    CallTargetView, CallView, CallWriteView, CaptureView, CaseMatchView, CaseView, ClassView,
+    ConstPathRead, ConstPathWrite, DefView, EnsureView, FindPatternView, ForView, GuardView,
+    HashPatternView, IfView, InView, IndexTargetView, IndexWriteView, IntegerLit, KeywordParamView,
+    LambdaView, LogicWriteView, LvarRef, LvarWrite, MatchView, ModuleView, MultiTargetView,
+    MultiWriteView, OpWriteView, ParamsView, ProgramView, RangeView, RescueModifierView,
+    RescueView, SclassView, SimpleLit, SuperView, VarWrite, WhenView, WhileView, YieldView,
 };
 use crate::{
     arguments_node_flags, call_node_flags, loop_flags, range_flags, AstNode, Integer, Node, Span,
@@ -1173,6 +1173,161 @@ impl BackendNode for Owned<'_> {
     fn implicit_value(&self) -> Option<Self> {
         match &self.node {
             Node::ImplicitNode { value, .. } => Some(self.child(value)),
+            _ => None,
+        }
+    }
+
+    fn op_write(&self) -> Option<OpWriteView<Self>> {
+        match &self.node {
+            Node::LocalVariableOperatorWriteNode {
+                name,
+                depth,
+                value,
+                binary_operator,
+                ..
+            } => Some(OpWriteView {
+                name: self.name(*name)?,
+                depth: *depth,
+                value: self.child(value),
+                binary_operator: self.name(*binary_operator)?,
+            }),
+            Node::InstanceVariableOperatorWriteNode {
+                name,
+                value,
+                binary_operator,
+                ..
+            }
+            | Node::ClassVariableOperatorWriteNode {
+                name,
+                value,
+                binary_operator,
+                ..
+            }
+            | Node::GlobalVariableOperatorWriteNode {
+                name,
+                value,
+                binary_operator,
+                ..
+            }
+            | Node::ConstantOperatorWriteNode {
+                name,
+                value,
+                binary_operator,
+                ..
+            } => Some(OpWriteView {
+                name: self.name(*name)?,
+                depth: 0,
+                value: self.child(value),
+                binary_operator: self.name(*binary_operator)?,
+            }),
+            _ => None,
+        }
+    }
+
+    fn logic_write(&self) -> Option<LogicWriteView<Self>> {
+        match &self.node {
+            Node::LocalVariableOrWriteNode {
+                name, depth, value, ..
+            }
+            | Node::LocalVariableAndWriteNode {
+                name, depth, value, ..
+            } => Some(LogicWriteView {
+                name: self.name(*name)?,
+                depth: *depth,
+                value: self.child(value),
+            }),
+            Node::InstanceVariableOrWriteNode { name, value, .. }
+            | Node::InstanceVariableAndWriteNode { name, value, .. }
+            | Node::ClassVariableOrWriteNode { name, value, .. }
+            | Node::ClassVariableAndWriteNode { name, value, .. }
+            | Node::GlobalVariableOrWriteNode { name, value, .. }
+            | Node::GlobalVariableAndWriteNode { name, value, .. }
+            | Node::ConstantOrWriteNode { name, value, .. }
+            | Node::ConstantAndWriteNode { name, value, .. } => Some(LogicWriteView {
+                name: self.name(*name)?,
+                depth: 0,
+                value: self.child(value),
+            }),
+            _ => None,
+        }
+    }
+
+    fn call_write(&self) -> Option<CallWriteView<Self>> {
+        match &self.node {
+            Node::CallOperatorWriteNode {
+                receiver,
+                read_name,
+                write_name,
+                binary_operator,
+                value,
+                flags,
+                ..
+            } => Some(CallWriteView {
+                receiver: self.opt_child(receiver),
+                read_name: self.name(*read_name)?,
+                write_name: self.name(*write_name)?,
+                binary_operator: Some(self.name(*binary_operator)?),
+                value: self.child(value),
+                safe_nav: flags & call_node_flags::SAFE_NAVIGATION != 0,
+            }),
+            Node::CallOrWriteNode {
+                receiver,
+                read_name,
+                write_name,
+                value,
+                flags,
+                ..
+            }
+            | Node::CallAndWriteNode {
+                receiver,
+                read_name,
+                write_name,
+                value,
+                flags,
+                ..
+            } => Some(CallWriteView {
+                receiver: self.opt_child(receiver),
+                read_name: self.name(*read_name)?,
+                write_name: self.name(*write_name)?,
+                binary_operator: None,
+                value: self.child(value),
+                safe_nav: flags & call_node_flags::SAFE_NAVIGATION != 0,
+            }),
+            _ => None,
+        }
+    }
+
+    fn index_write(&self) -> Option<IndexWriteView<Self>> {
+        match &self.node {
+            Node::IndexOperatorWriteNode {
+                receiver,
+                arguments,
+                value,
+                binary_operator,
+                ..
+            } => Some(IndexWriteView {
+                receiver: self.opt_child(receiver),
+                args: self.opt_child(arguments),
+                value: self.child(value),
+                binary_operator: Some(self.name(*binary_operator)?),
+            }),
+            Node::IndexOrWriteNode {
+                receiver,
+                arguments,
+                value,
+                ..
+            }
+            | Node::IndexAndWriteNode {
+                receiver,
+                arguments,
+                value,
+                ..
+            } => Some(IndexWriteView {
+                receiver: self.opt_child(receiver),
+                args: self.opt_child(arguments),
+                value: self.child(value),
+                binary_operator: None,
+            }),
             _ => None,
         }
     }

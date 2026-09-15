@@ -3,7 +3,7 @@
 //! Dispatch is on `kind_name` (1:1 with the C `switch` on node type); values
 //! travel through `BackendNode`, so FFI and owned frontends share handlers.
 
-use carnelian_ast::view::{BackendNode, SimpleLit};
+use carnelian_ast::view::{BackendNode, CallView, CallWriteView, IndexWriteView, SimpleLit};
 
 use crate::codegen::{LoopType, Scope, Session, JMPLINK_START};
 use crate::diagnostics::{Diagnostic, Diagnostics};
@@ -362,14 +362,6 @@ fn unsupported<N: BackendNode>(node: &N, what: &str) -> Diagnostic {
     }
 }
 
-fn unsupported_text(what: &str) -> Diagnostic {
-    Diagnostic {
-        message: format!("unsupported {what} in P1"),
-        start: 0,
-        end: 0,
-    }
-}
-
 fn const_true<N: BackendNode>(node: &N) -> bool {
     matches!(
         node.kind_name(),
@@ -513,6 +505,29 @@ fn codegen_dispatch<N: BackendNode>(
         "ClassVariableWriteNode" => gen_cvar_write(cg, node, val),
         "GlobalVariableReadNode" => gen_gvar_read(cg, node, val),
         "GlobalVariableWriteNode" => gen_gvar_write(cg, node, val),
+        "LocalVariableOperatorWriteNode"
+        | "GlobalVariableOperatorWriteNode"
+        | "InstanceVariableOperatorWriteNode"
+        | "ClassVariableOperatorWriteNode"
+        | "ConstantOperatorWriteNode" => gen_op_write(cg, node, val),
+        "LocalVariableOrWriteNode"
+        | "LocalVariableAndWriteNode"
+        | "GlobalVariableOrWriteNode"
+        | "GlobalVariableAndWriteNode"
+        | "InstanceVariableOrWriteNode"
+        | "InstanceVariableAndWriteNode"
+        | "ClassVariableOrWriteNode"
+        | "ClassVariableAndWriteNode"
+        | "ConstantOrWriteNode"
+        | "ConstantAndWriteNode" => gen_logic_write(cg, node, val),
+        "CallOperatorWriteNode" | "CallOrWriteNode" | "CallAndWriteNode" => {
+            gen_call_write(cg, node, val)
+        }
+        "IndexOperatorWriteNode" | "IndexOrWriteNode" | "IndexAndWriteNode" => {
+            gen_index_write(cg, node, val)
+        }
+        "ConstantPathOperatorWriteNode" => Err(const_reassign(&node)),
+        "ConstantPathOrWriteNode" | "ConstantPathAndWriteNode" => Err(const_path_logic_gate(&node)),
         "BackReferenceReadNode" => gen_backref(cg, node, val),
         "NumberedReferenceReadNode" => gen_numbered_ref(cg, node, val),
         "SuperNode" => gen_super(cg, node, val),
@@ -1043,6 +1058,456 @@ fn gen_call_target<N: BackendNode>(cg: &mut Codegen, tree: &N, sp: u16) -> Resul
         sym,
         1,
     )?;
+    Ok(())
+}
+
+/// Constant path reassignment (`Parent::Name += v`): the reference fails
+/// with `constant re-assignment`, so the gate carries the same marker.
+fn const_reassign<N: BackendNode>(node: &N) -> Diagnostic {
+    let span = node.span();
+    Diagnostic {
+        message: format!("constant re-assignment: {}", node.kind_name()),
+        start: span.start,
+        end: span.end,
+    }
+}
+
+/// Constant path `||=`/`&&=` (`Parent::Name ||= v`): the reference fails with
+/// `Not implemented: PM_CONSTANT_PATH_*_WRITE_NODE`, so the gate carries the
+/// same marker.
+fn const_path_logic_gate<N: BackendNode>(node: &N) -> Diagnostic {
+    let span = node.span();
+    Diagnostic {
+        message: format!("Not implemented: {}", node.kind_name()),
+        start: span.start,
+        end: span.end,
+    }
+}
+
+/// Scalar operator write (`x += v`, `@x -= v`, `$g *= v`, `@@c /= v`,
+/// `C %= v`, `case PM_*_OPERATOR_WRITE_NODE`): read the target, apply the
+/// binary operator, store the result.
+fn gen_op_write<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let kind = node.kind_name();
+    let Some(view) = node.op_write() else {
+        return Err(unsupported(&node, "operator assignment"));
+    };
+    let is_lvar = kind == "LocalVariableOperatorWriteNode";
+    let depth = if is_lvar {
+        view.depth + u32::from(cg.current().1.for_depth)
+    } else {
+        0
+    };
+    if is_lvar {
+        gen_lvar(cg, &view.name, depth)?;
+    } else {
+        let op = match kind {
+            "GlobalVariableOperatorWriteNode" => opcode::OP_GETGV,
+            "InstanceVariableOperatorWriteNode" => opcode::OP_GETIV,
+            "ClassVariableOperatorWriteNode" => opcode::OP_GETCV,
+            "ConstantOperatorWriteNode" => opcode::OP_GETCONST,
+            _ => return Err(unsupported(&node, "operator assignment")),
+        };
+        let sym = {
+            let (session, scope) = cg.current();
+            scope.new_sym(session, &view.name)?
+        };
+        {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_2(session, op, dst, sym)?;
+        }
+        cg.current().1.push_n(1)?;
+    }
+    codegen(cg, view.value, true)?;
+    cg.current().1.push_n(1)?;
+    cg.current().1.pop_n(1)?;
+    cg.current().1.pop_n(2)?;
+    gen_binary_operator(cg, &view.binary_operator)?;
+    if is_lvar {
+        let sp = cg.current().1.cursp();
+        gen_assignment_lvar(cg, sp, &view.name, depth, val)?;
+    } else {
+        let op = match kind {
+            "GlobalVariableOperatorWriteNode" => opcode::OP_SETGV,
+            "InstanceVariableOperatorWriteNode" => opcode::OP_SETIV,
+            "ClassVariableOperatorWriteNode" => opcode::OP_SETCV,
+            "ConstantOperatorWriteNode" => opcode::OP_SETCONST,
+            _ => return Err(unsupported(&node, "operator assignment")),
+        };
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.gen_setxv(session, op, dst, &view.name, val)?;
+    }
+    if val {
+        cg.current().1.push_n(1)?;
+    }
+    Ok(())
+}
+
+/// Scalar `||=`/`&&=` write (`case PM_*_OR_WRITE_NODE` /
+/// `PM_*_AND_WRITE_NODE`): read the target, keep it on a truthiness jump,
+/// otherwise store the right-hand side. `@@x ||=` and `C ||=` read under a
+/// rescue that answers false when the variable is undefined.
+fn gen_logic_write<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let kind = node.kind_name();
+    let Some(view) = node.logic_write() else {
+        return Err(unsupported(&node, "or assignment"));
+    };
+    let op_jmp = if kind.ends_with("OrWriteNode") {
+        opcode::OP_JMPIF
+    } else {
+        opcode::OP_JMPNOT
+    };
+    let is_lvar = kind == "LocalVariableOrWriteNode" || kind == "LocalVariableAndWriteNode";
+    let depth = if is_lvar {
+        view.depth + u32::from(cg.current().1.for_depth)
+    } else {
+        0
+    };
+    if is_lvar {
+        gen_lvar(cg, &view.name, depth)?;
+    } else if kind == "ClassVariableOrWriteNode" || kind == "ConstantOrWriteNode" {
+        let op = if kind == "ClassVariableOrWriteNode" {
+            opcode::OP_GETCV
+        } else {
+            opcode::OP_GETCONST
+        };
+        gen_logic_rescue_read(cg, &view.name, op)?;
+    } else {
+        let op = match kind {
+            "GlobalVariableOrWriteNode" | "GlobalVariableAndWriteNode" => opcode::OP_GETGV,
+            "InstanceVariableOrWriteNode" | "InstanceVariableAndWriteNode" => opcode::OP_GETIV,
+            "ClassVariableAndWriteNode" => opcode::OP_GETCV,
+            "ConstantAndWriteNode" => opcode::OP_GETCONST,
+            _ => return Err(unsupported(&node, "or assignment")),
+        };
+        let sym = {
+            let (session, scope) = cg.current();
+            scope.new_sym(session, &view.name)?
+        };
+        {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_2(session, op, dst, sym)?;
+        }
+        cg.current().1.push_n(1)?;
+    }
+    cg.current().1.pop_n(1)?;
+    let pos = {
+        let (session, scope) = cg.current();
+        let cur = scope.cursp();
+        scope.genjmp2(session, op_jmp, cur, JMPLINK_START, val)?
+    };
+    codegen(cg, view.value, true)?;
+    cg.current().1.pop_n(1)?;
+    if is_lvar {
+        let sp = cg.current().1.cursp();
+        gen_assignment_lvar(cg, sp, &view.name, depth, val)?;
+        if val {
+            cg.current().1.push_n(1)?;
+        }
+    } else {
+        let op = match kind {
+            "GlobalVariableOrWriteNode" | "GlobalVariableAndWriteNode" => opcode::OP_SETGV,
+            "InstanceVariableOrWriteNode" | "InstanceVariableAndWriteNode" => opcode::OP_SETIV,
+            "ClassVariableOrWriteNode" | "ClassVariableAndWriteNode" => opcode::OP_SETCV,
+            "ConstantOrWriteNode" | "ConstantAndWriteNode" => opcode::OP_SETCONST,
+            _ => return Err(unsupported(&node, "or assignment")),
+        };
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.gen_setxv(session, op, dst, &view.name, val)?;
+        if val {
+            cg.current().1.push_n(1)?;
+        }
+    }
+    cg.current().1.dispatch(pos)?;
+    Ok(())
+}
+
+/// Guarded read for `@@x ||=` and `C ||=`: the `GET` runs under a rescue
+/// that answers false when the variable is undefined (`loop_push` with
+/// `LOOP_BEGIN`, retargeted to `LOOP_RESCUE` before the pop, like `gen_begin`).
+fn gen_logic_rescue_read(cg: &mut Codegen, name: &[u8], op_get: u8) -> Result<(), Diagnostic> {
+    {
+        let (_, scope) = cg.current();
+        scope.loop_push(LoopType::Begin);
+        let pc0 = scope.new_label();
+        scope.loops.last_mut().expect("loop").pc0 = pc0;
+    }
+    let catch_entry = cg.current().1.catch_new();
+    let begin = cg.current().1.pc;
+    let exc = cg.current().1.cursp();
+    {
+        let (session, scope) = cg.current();
+        let sym = scope.new_sym(session, name)?;
+        let dst = scope.cursp();
+        scope.genop_2(session, op_get, dst, sym)?;
+    }
+    cg.current().1.push_n(1)?;
+    let end = cg.current().1.pc;
+    let noexc = cg.current().1.genjmp(opcode::OP_JMP, JMPLINK_START)?;
+    cg.current().1.loops.last_mut().expect("loop").kind = LoopType::Rescue;
+    {
+        let target = cg.current().1.pc;
+        cg.current()
+            .1
+            .catch_set(catch_entry, CATCH_RESCUE, begin, end, target);
+    }
+    {
+        let (session, scope) = cg.current();
+        scope.genop_1(session, opcode::OP_EXCEPT, exc)?;
+        scope.genop_1(session, opcode::OP_LOADFALSE, exc)?;
+    }
+    cg.current().1.dispatch(noexc)?;
+    {
+        let (session, scope) = cg.current();
+        scope.loop_pop(session, false)?;
+    }
+    Ok(())
+}
+
+/// Call operator/`||=`/`&&=` write (`obj.foo += v`, `obj.foo ||= v`,
+/// `obj.foo &&= v`, `case PM_CALL_*_WRITE_NODE`): send the getter, combine
+/// or test, send the setter. A written `self` reads and writes through
+/// `OP_SSEND` so a private accessor stays reachable.
+fn gen_call_write<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let kind = node.kind_name();
+    let Some(view) = node.call_write() else {
+        return Err(unsupported(&node, "call assignment"));
+    };
+    let CallWriteView {
+        receiver,
+        read_name,
+        write_name,
+        binary_operator,
+        value,
+        safe_nav,
+    } = view;
+    let is_or = kind == "CallOrWriteNode";
+    let op_jmp = if is_or {
+        opcode::OP_JMPIF
+    } else {
+        opcode::OP_JMPNOT
+    };
+    let op_send = match &receiver {
+        Some(recv) if recv.kind_name() != "SelfNode" => opcode::OP_SEND,
+        // An absent receiver is an implicit `self`, like a bare call.
+        _ => opcode::OP_SSEND,
+    };
+    let mut vsp: Option<u16> = None;
+    if val {
+        let slot = cg.current().1.cursp();
+        cg.current().1.push_n(1)?;
+        vsp = Some(slot);
+    }
+    match receiver {
+        None => cg.current().1.push_n(1)?,
+        Some(recv) => codegen(cg, recv, true)?,
+    }
+    let mut skip = JMPLINK_START;
+    if safe_nav {
+        let recv = cg.current().1.cursp() - 1;
+        {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.gen_move(session, dst, recv, true)?;
+        }
+        skip = {
+            let (session, scope) = cg.current();
+            let cur = scope.cursp();
+            scope.genjmp2(session, opcode::OP_JMPNIL, cur, JMPLINK_START, val)?
+        };
+    }
+    let read_sym = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, &read_name)?
+    };
+    let base = cg.current().1.cursp() - 1;
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.gen_move(session, dst, base, true)?;
+    }
+    cg.current().1.push_n(2)?;
+    cg.current().1.pop_n(2)?;
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_3(session, op_send, dst, read_sym, 0)?;
+    }
+    let mut pos = JMPLINK_START;
+    if let Some(operator) = binary_operator {
+        cg.current().1.push_n(1)?;
+        codegen(cg, value, true)?;
+        cg.current().1.push_n(1)?;
+        cg.current().1.pop_n(1)?;
+        cg.current().1.pop_n(2)?;
+        gen_binary_operator(cg, &operator)?;
+    } else {
+        if let Some(slot) = vsp {
+            let (session, scope) = cg.current();
+            let cur = scope.cursp();
+            scope.gen_move(session, slot, cur, false)?;
+        }
+        pos = {
+            let (session, scope) = cg.current();
+            let cur = scope.cursp();
+            scope.genjmp2(session, op_jmp, cur, JMPLINK_START, val)?
+        };
+        codegen(cg, value, true)?;
+        cg.current().1.pop_n(1)?;
+    }
+    if let Some(slot) = vsp {
+        // A real move: the peephole must not hoist a loaded right-hand side
+        // out of the argument register the write send reads below.
+        let (session, scope) = cg.current();
+        let cur = scope.cursp();
+        scope.gen_move(session, slot, cur, true)?;
+    }
+    cg.current().1.pop_n(1)?;
+    let write_sym = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, &write_name)?
+    };
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_3(session, op_send, dst, write_sym, 1)?;
+    }
+    cg.current().1.dispatch(pos)?;
+    if safe_nav {
+        cg.current().1.dispatch(skip)?;
+    }
+    Ok(())
+}
+
+/// Index operator/`||=`/`&&=` write (`a[i] += v`, `a[i] ||= v`,
+/// `a[i] &&= v`, `case PM_INDEX_*_WRITE_NODE`): send `[]`, combine or test,
+/// send `[]=` (or `OP_SETIDX` for a single index through the call-assign
+/// path, which handles plain writes; here both sends stay explicit).
+fn gen_index_write<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let kind = node.kind_name();
+    let Some(view) = node.index_write() else {
+        return Err(unsupported(&node, "index assignment"));
+    };
+    let IndexWriteView {
+        receiver,
+        args,
+        value,
+        binary_operator,
+    } = view;
+    let Some(recv_node) = receiver else {
+        return Err(unsupported(&node, "index assignment"));
+    };
+    let is_or = kind == "IndexOrWriteNode";
+    let op_jmp = if is_or {
+        opcode::OP_JMPIF
+    } else {
+        opcode::OP_JMPNOT
+    };
+    // A written `self` reads and writes through `OP_SSEND` so a private
+    // `[]` stays reachable.
+    let op_send = if recv_node.kind_name() == "SelfNode" {
+        opcode::OP_SSEND
+    } else {
+        opcode::OP_SEND
+    };
+    let mut vsp: Option<u16> = None;
+    if val {
+        let slot = cg.current().1.cursp();
+        cg.current().1.push_n(1)?;
+        vsp = Some(slot);
+    }
+    codegen(cg, recv_node, true)?;
+    let aref_sym = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, b"[]")?
+    };
+    let base = cg.current().1.cursp() - 1;
+    let items = match args {
+        None => Vec::new(),
+        Some(args) => args
+            .raw_call_args()
+            .ok_or_else(|| unsupported(&node, "index assignment"))?,
+    };
+    let nargs = gen_values(cg, items, true, 13)?;
+    let (nargs, mut callargs) = if nargs >= 0 {
+        (nargs, nargs)
+    } else {
+        cg.current().1.push_n(1)?;
+        (1, CALL_MAXARGS)
+    };
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.gen_move(session, dst, base, true)?;
+    }
+    for index in 0..nargs {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp() + index as u16 + 1;
+        scope.gen_move(session, dst, (base as i32 + index + 1) as u16, true)?;
+    }
+    cg.current().1.push_n((nargs + 2) as u16)?;
+    cg.current().1.pop_n((nargs + 2) as u16)?;
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_3(session, op_send, dst, aref_sym, callargs as u8)?;
+    }
+    let mut pos = JMPLINK_START;
+    if let Some(operator) = binary_operator {
+        cg.current().1.push_n(1)?;
+        codegen(cg, value, true)?;
+        cg.current().1.push_n(1)?;
+        cg.current().1.pop_n(1)?;
+        cg.current().1.pop_n(2)?;
+        gen_binary_operator(cg, &operator)?;
+    } else {
+        if let Some(slot) = vsp {
+            let (session, scope) = cg.current();
+            let cur = scope.cursp();
+            scope.gen_move(session, slot, cur, false)?;
+        }
+        pos = {
+            let (session, scope) = cg.current();
+            let cur = scope.cursp();
+            scope.genjmp2(session, op_jmp, cur, JMPLINK_START, val)?
+        };
+        codegen(cg, value, true)?;
+        cg.current().1.pop_n(1)?;
+        cg.current().1.dispatch(pos)?;
+    }
+    if let Some(slot) = vsp {
+        let (session, scope) = cg.current();
+        let cur = scope.cursp();
+        scope.gen_move(session, slot, cur, false)?;
+    }
+    if callargs == CALL_MAXARGS {
+        cg.current().1.pop_n(1)?;
+        {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_2(session, opcode::OP_ARYPUSH, dst, 1)?;
+        }
+    } else {
+        cg.current().1.pop_n(callargs as u16)?;
+        callargs += 1;
+    }
+    cg.current().1.pop_n(1)?;
+    let aset_sym = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, b"[]=")?
+    };
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_3(session, op_send, dst, aset_sym, callargs as u8)?;
+    }
+    if pos != JMPLINK_START {
+        cg.current().1.dispatch(pos)?;
+    }
     Ok(())
 }
 
@@ -2885,7 +3350,8 @@ fn gen_forward_arg(cg: &mut Codegen, name: &[u8], val: bool) -> Result<(), Diagn
     Ok(())
 }
 
-/// Local variable load into the cursor (`gen_lvar`).
+/// Local variable load into the cursor (`gen_lvar`): a local move, or an
+/// upvar load past enclosing scopes (operator writes inside blocks).
 fn gen_lvar(cg: &mut Codegen, name: &[u8], depth: u32) -> Result<(), Diagnostic> {
     if depth == 0 {
         let index = cg.current().1.lv_idx(name);
@@ -2893,9 +3359,38 @@ fn gen_lvar(cg: &mut Codegen, name: &[u8], depth: u32) -> Result<(), Diagnostic>
         let dst = scope.cursp();
         scope.gen_move(session, dst, index, true)?;
     } else {
-        return Err(unsupported_text("upvar read"));
+        let (slot, level) = cg.search_upvar(name)?;
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.gen_getupvar(session, dst, slot, level)?;
     }
     cg.current().1.push_n(1)
+}
+
+/// Binary operator on the two values at the cursor (`gen_binary_operator`):
+/// `+`/`-` fold onto integer loads, `*`/`/` have direct opcodes, and anything
+/// else sends the operator as a one-argument call.
+fn gen_binary_operator(cg: &mut Codegen, name: &[u8]) -> Result<(), Diagnostic> {
+    let dst = cg.current().1.cursp();
+    if name == b"+" {
+        gen_addsub(cg, opcode::OP_ADD, dst)
+    } else if name == b"-" {
+        gen_addsub(cg, opcode::OP_SUB, dst)
+    } else if name == b"*" {
+        let (session, scope) = cg.current();
+        scope.genop_1(session, opcode::OP_MUL, dst)
+    } else if name == b"/" {
+        let (session, scope) = cg.current();
+        scope.genop_1(session, opcode::OP_DIV, dst)
+    } else {
+        let sym = {
+            let (session, scope) = cg.current();
+            scope.new_sym(session, name)?
+        };
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_3(session, opcode::OP_SEND, dst, sym, 1)
+    }
 }
 
 /// Splatted value as an expression (`PM_SPLAT_NODE`).
@@ -3047,6 +3542,171 @@ fn gen_call<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), 
     gen_call_impl(cg, node, val, false)
 }
 
+/// Whether a call's arguments are simple enough for `gen_call_assign` (no
+/// keyword hash or forwarding that would obscure the right-hand side, which
+/// rides as the last positional argument).
+fn attr_assign_simple_args<N: BackendNode>(view: &CallView<N>) -> bool {
+    let Some(args) = &view.args else {
+        return false;
+    };
+    let Some(items) = args.call_args() else {
+        return false;
+    };
+    if items.is_empty() {
+        return false;
+    }
+    items.iter().all(|item| {
+        let kind = item.kind_name();
+        kind != "KeywordHashNode" && kind != "ForwardingArgumentsNode"
+    })
+}
+
+/// Attribute assignment (`recv.attr = v`, `recv[i] = v`) as an expression
+/// (`gen_call_assign`): the right-hand side is the last positional argument,
+/// copied into a reserved slot below the call frame so the expression keeps
+/// its value while the send result is discarded. With `recv_ready` the
+/// receiver already sits at `cursp()-1`.
+fn gen_call_assign<N: BackendNode>(
+    cg: &mut Codegen,
+    node: &N,
+    view: CallView<N>,
+    val: bool,
+    safe: bool,
+    recv_ready: bool,
+) -> Result<(), Diagnostic> {
+    let name = view.name;
+    let noop = cg.session.no_optimize;
+    let opt_setidx = !noop && name == b"[]=";
+    let (top, callsp, noself) = if recv_ready {
+        // The receiver's slot becomes the room for the result, and the
+        // receiver moves up above it.
+        let top = cg.current().1.cursp() - 1;
+        {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.gen_move(session, dst, top, true)?;
+        }
+        cg.current().1.push_n(1)?;
+        let callsp = cg.current().1.cursp() - 1;
+        (top, callsp, false)
+    } else {
+        let top = cg.current().1.cursp();
+        cg.current().1.push_n(1)?;
+        let callsp = cg.current().1.cursp();
+        // A written `self` is a call on self, so a private setter stays
+        // reachable; the register is still loaded where an instruction reads
+        // it before the send (that is, for `OP_SETIDX` and the `&.` check).
+        let noself = match &view.receiver {
+            None => {
+                cg.current().1.push_n(1)?;
+                true
+            }
+            Some(recv) if recv.kind_name() == "SelfNode" => {
+                if opt_setidx || safe {
+                    codegen(cg, recv.clone(), true)?;
+                } else {
+                    cg.current().1.push_n(1)?;
+                }
+                true
+            }
+            Some(recv) => {
+                codegen(cg, recv.clone(), true)?;
+                false
+            }
+        };
+        (top, callsp, noself)
+    };
+    let mut skip = JMPLINK_START;
+    if safe {
+        let recv = cg.current().1.cursp() - 1;
+        {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.gen_move(session, dst, recv, true)?;
+        }
+        skip = {
+            let (session, scope) = cg.current();
+            let cur = scope.cursp();
+            scope.genjmp2(session, opcode::OP_JMPNIL, cur, JMPLINK_START, val)?
+        };
+    }
+    // The indices, then the right-hand side apart from them: a splat among
+    // the indices gathers them into an array, and the right-hand side has to
+    // be held back from it until it has been copied to the result slot.
+    let mut n: i32 = 0;
+    let mut gathered = false;
+    if let Some(args_node) = view.args {
+        let Some(items) = args_node.call_args() else {
+            return Err(unsupported(node, "complex arguments"));
+        };
+        if !items.is_empty() {
+            let last = items.len() - 1;
+            let count = gen_values(cg, items[..last].to_vec(), true, 13)?;
+            if count < 0 {
+                gathered = true;
+                cg.current().1.push_n(1)?;
+            }
+            codegen(cg, items[last].clone(), true)?;
+            if !gathered {
+                n = count + 1;
+            }
+        }
+    }
+    if val {
+        // Keep the right-hand side in its argument slot for the send, while
+        // also copying it to the reserved result slot.
+        let (session, scope) = cg.current();
+        let src = scope.cursp() - 1;
+        scope.gen_move(session, top, src, true)?;
+    }
+    if gathered {
+        // The right-hand side joins the indices in their array, which is the
+        // one argument.
+        cg.current().1.pop_n(2)?;
+        {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_2(session, opcode::OP_ARYPUSH, dst, 1)?;
+        }
+        cg.current().1.push_n(1)?;
+        n = CALL_MAXARGS;
+    }
+    cg.current().1.push_n(1)?;
+    cg.current().1.pop_n(1)?;
+    cg.current().1.sp = callsp;
+    if opt_setidx && n == 2 {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_1(session, opcode::OP_SETIDX, dst)?;
+    } else {
+        let sym = {
+            let (session, scope) = cg.current();
+            scope.new_sym(session, &name)?
+        };
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_3(
+            session,
+            if noself {
+                opcode::OP_SSEND
+            } else {
+                opcode::OP_SEND
+            },
+            dst,
+            sym,
+            n as u8,
+        )?;
+    }
+    if safe {
+        cg.current().1.dispatch(skip)?;
+    }
+    cg.current().1.sp = top;
+    if val {
+        cg.current().1.push_n(1)?;
+    }
+    Ok(())
+}
+
 /// Method call (`gen_call`); `recv_ready` means the receiver is already
 /// evaluated at `cursp()-1` (chain links in `defined?`).
 fn gen_call_impl<N: BackendNode>(
@@ -3058,8 +3718,14 @@ fn gen_call_impl<N: BackendNode>(
     let Some(view) = node.call() else {
         return Err(unsupported(&node, "call"));
     };
-    if view.attr_write {
-        return Err(unsupported(&node, "attribute assignment"));
+    // Attribute assignment (`recv.attr = v`, `recv[i] = v`) evaluates to the
+    // right-hand side, not to the setter's return value, so valued writes
+    // with simple arguments take the `gen_call_assign` path. Anything else
+    // (a discarded value, a splat-gathered tail aside, keywords, or
+    // forwarding) falls through to the normal call, like `gen_call`.
+    if view.attr_write && val && attr_assign_simple_args(&view) {
+        let safe = view.safe_nav;
+        return gen_call_assign(cg, &node, view, val, safe, recv_ready);
     }
     let safe = view.safe_nav;
     let name = view.name;
@@ -3199,6 +3865,10 @@ fn emit_call(
         } else {
             send_call(cg, noself, blk, name, nargs, nk, dst)?;
         }
+    } else if !noop && name == b"[]=" && nargs == 2 {
+        // A discarded index write still stores through `OP_SETIDX`.
+        let (session, scope) = cg.current();
+        scope.genop_1(session, opcode::OP_SETIDX, dst)?;
     } else if !noop && nargs == 0 && gen_uniop(cg, name, dst)? {
         // A literal absorbed its sign.
     } else {

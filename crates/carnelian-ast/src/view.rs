@@ -495,6 +495,70 @@ pub struct CallTargetView<N> {
     pub name: Vec<u8>,
 }
 
+/// `*OperatorWrite` on a scalar (`x += v`, `@x -= v`, `$g *= v`, `@@c /= v`,
+/// `C %= v`): the name, the right-hand side, and the binary operator symbol
+/// bytes. `depth` is the local depth for `LocalVariableOperatorWriteNode`
+/// and `0` otherwise (the backend adds `for_depth` for locals, mirroring
+/// `gen_assignment`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpWriteView<N> {
+    /// Variable or constant name bytes.
+    pub name: Vec<u8>,
+    /// Scope depth (locals only).
+    pub depth: u32,
+    /// Right-hand side.
+    pub value: N,
+    /// Binary operator symbol bytes (e.g. `+`).
+    pub binary_operator: Vec<u8>,
+}
+
+/// `*OrWrite`/`*AndWrite` on a scalar (`x ||= v`, `@x &&= v`, ...): the same
+/// layout without the operator (the backend picks `JMPIF`/`JMPNOT` by kind).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogicWriteView<N> {
+    /// Variable or constant name bytes.
+    pub name: Vec<u8>,
+    /// Scope depth (locals only).
+    pub depth: u32,
+    /// Right-hand side.
+    pub value: N,
+}
+
+/// `Call*Write` (`obj.foo += v`, `obj.foo ||= v`, `obj.foo &&= v`): the
+/// receiver, the read/write names, the right-hand side, and safe navigation.
+/// `binary_operator` is `Some` for operator writes and `None` for `||=` and
+/// `&&=` (the backend picks the jump by kind there).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallWriteView<N> {
+    /// Receiver expression (`None` for an implicit-`self` call).
+    pub receiver: Option<N>,
+    /// Getter name bytes.
+    pub read_name: Vec<u8>,
+    /// Setter name bytes (with the `=`).
+    pub write_name: Vec<u8>,
+    /// Binary operator symbol bytes (`None` for `||=`/`&&=`).
+    pub binary_operator: Option<Vec<u8>>,
+    /// Right-hand side.
+    pub value: N,
+    /// `&.` safe navigation.
+    pub safe_nav: bool,
+}
+
+/// `Index*Write` (`a[i] += v`, `a[i] ||= v`, `a[i] &&= v`): the receiver, the
+/// `ArgumentsNode`, the right-hand side, and the optional operator (same
+/// `Some`/`None` split as calls).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexWriteView<N> {
+    /// Receiver expression (`None` fails closed; writes always carry one).
+    pub receiver: Option<N>,
+    /// `ArgumentsNode` (`None` for a bare `recv[] op= value`).
+    pub args: Option<N>,
+    /// Right-hand side.
+    pub value: N,
+    /// Binary operator symbol bytes (`None` for `||=`/`&&=`).
+    pub binary_operator: Option<Vec<u8>>,
+}
+
 /// Explicit `super` call (`SuperNode` with plain positional arguments,
 /// plus `...` forwarding which rides `gen_values`).
 /// `args` is `None` for `super()` and `Some` (possibly empty) otherwise;
@@ -984,6 +1048,30 @@ pub trait BackendNode: AstNode + Clone + Sized {
 
     /// Call assignment target (`CallTargetNode`).
     fn call_target(&self) -> Option<CallTargetView<Self>> {
+        None
+    }
+
+    /// Scalar operator write (`*OperatorWriteNode` on a local, ivar, gvar,
+    /// cvar, or constant).
+    fn op_write(&self) -> Option<OpWriteView<Self>> {
+        None
+    }
+
+    /// Scalar `||=`/`&&=` write (`*OrWriteNode`/`*AndWriteNode` on a local,
+    /// ivar, gvar, cvar, or constant).
+    fn logic_write(&self) -> Option<LogicWriteView<Self>> {
+        None
+    }
+
+    /// Call operator/`||=`/`&&=` write (`CallOperatorWriteNode`,
+    /// `CallOrWriteNode`, `CallAndWriteNode`).
+    fn call_write(&self) -> Option<CallWriteView<Self>> {
+        None
+    }
+
+    /// Index operator/`||=`/`&&=` write (`IndexOperatorWriteNode`,
+    /// `IndexOrWriteNode`, `IndexAndWriteNode`).
+    fn index_write(&self) -> Option<IndexWriteView<Self>> {
         None
     }
 

@@ -329,6 +329,34 @@ pub const P24_SNIPPETS: &[(&str, &str)] = &[
         "def foo(a, b = 1, *c, d, e:, f: 2, **g, &h)\n  [a, b, c, d, e, f, g]\nend\nputs foo(1, 2, 3, 4, e: 5, x: 6) { 7 }\n",
     ),
     ("def_forwarding", "def foo(...)\n  1\nend\nputs foo(1, 2)\n"),
+    // Scalar operator writes (`x += v` and kin).
+    ("lvar_op", "x = 0\nx += 1\nputs x\n"),
+    ("lvar_sub", "x = 10\nx -= 3\nputs x\n"),
+    ("lvar_mul", "x = 3\nx *= 4\nputs x\n"),
+    ("lvar_div", "x = 8\nx /= 2\nputs x\n"),
+    ("lvar_mod", "x = 8\nx %= 3\nputs x\n"),
+    ("lvar_pow", "x = 2\nx **= 3\nputs x\n"),
+    ("lvar_or", "x = nil\nx ||= 1\nputs x\n"),
+    ("lvar_and", "x = true\nx &&= 2\nputs x\n"),
+    ("lvar_noval_op", "x = 0\nx += 1\nputs 1\n"),
+    ("lvar_op_block", "x = 1\n[1].each { x += 1 }\nputs x\n"),
+    ("lvar_or_block", "x = nil\n[1].each { x ||= 1 }\nputs x\n"),
+    ("or_chain", "x = nil\ny = nil\nx ||= y ||= 1\nputs x\nputs y\n"),
+    ("ivar_op", "@x = 0\n@x += 1\nputs @x\n"),
+    ("ivar_and", "@x = true\n@x &&= 2\nputs @x\n"),
+    ("gvar_op", "$g = 0\n$g += 1\nputs $g\n"),
+    ("gvar_or", "$g = nil\n$g ||= 1\nputs $g\n"),
+    (
+        "cvar_op",
+        "class Foo\n  @@c = 0\n  @@c += 1\n  def get\n    @@c\n  end\nend\nputs Foo.new.get\n",
+    ),
+    (
+        "cvar_or",
+        "class Foo\n  @@x = 1\n  @@x ||= 2\n  def get\n    @@x\n  end\nend\nputs Foo.new.get\n",
+    ),
+    ("const_op", "C = 0\nC += 1\nputs C\n"),
+    ("const_or", "X = 1\nX ||= 2\nputs X\n"),
+    ("const_and", "X = true\nX &&= 2\nputs X\n"),
     ("return_valued", "def f(x)\n  return x\nend\nputs f(1)\n"),
     ("return_bare", "def f\n  return\nend\nputs f\n"),
     ("return_toplevel", "return 1\n"),
@@ -338,18 +366,24 @@ pub const P24_SNIPPETS: &[(&str, &str)] = &[
 
 /// `GATED` table from `p24_defclass.rs`.
 pub const P24_GATED: &[(&str, &str, &str)] = &[
-    ("ivar_op_gated", "@x = 1\n@x += 1\nputs @x\n", "InstanceVariableOperatorWriteNode"),
+    // Constant path `op=`/`||=`/`&&=`: the reference rejects them too
+    // (`constant re-assignment` / `Not implemented`), so they stay gated
+    // with agreement tests.
     (
-        "ivar_or_gated",
-        "@x = 1\n@x ||= 2\nputs @x\n",
-        "InstanceVariableOrWriteNode",
+        "const_path_op_gated",
+        "class Foo24g\nend\nFoo24g::Bar = 0\nFoo24g::Bar += 1\nputs Foo24g::Bar\n",
+        "constant re-assignment",
     ),
     (
-        "cvar_or_gated",
-        "@@x = 1\n@@x ||= 2\nputs @@x\n",
-        "ClassVariableOrWriteNode",
+        "const_path_or_gated",
+        "class Foo24h\nend\nFoo24h::Bar = 0\nFoo24h::Bar ||= 1\nputs 1\n",
+        "Not implemented: ConstantPathOrWriteNode",
     ),
-    ("const_or_gated", "X = 1\nX ||= 2\nputs X\n", "ConstantOrWriteNode"),
+    (
+        "const_path_and_gated",
+        "class Foo24i\nend\nFoo24i::Bar = true\nFoo24i::Bar &&= 1\nputs 1\n",
+        "Not implemented: ConstantPathAndWriteNode",
+    ),
     (
         "super_splat_gated",
         "class A\n  def foo(a)\n    a\n  end\nend\nclass B < A\n  def foo(a)\n    super(*a)\n  end\nend\n",
@@ -562,6 +596,52 @@ pub const P25_SNIPPETS: &[(&str, &str)] = &[
         "for_lvar_collection",
         "x = [1, 2]\nfor i in x do\n  puts i\nend\n",
     ),
+    // Attribute, index, and call assignment (`x.y = v`, `a[i] = v`) plus
+    // the `op=`/`||=`/`&&=` family over index and call targets.
+    ("index_write", "a = [0]\na[0] = 1\nputs a[0]\n"),
+    ("index_sym_write", "h = {}\nh[:a] = 1\nputs h[:a]\n"),
+    ("index_noval", "a = [0]\na[0] = 1\nputs 2\n"),
+    (
+        "attr_write",
+        "class Box25w\n  attr_accessor :x\nend\nb = Box25w.new\nb.x = 1\nputs b.x\n",
+    ),
+    (
+        "attr_noval",
+        "class Box25n\n  attr_accessor :x\nend\nb = Box25n.new\nb.x = 1\nputs 2\n",
+    ),
+    (
+        "attr_safe",
+        "class Box25s\n  attr_accessor :x\nend\nb = Box25s.new\nb&.x = 1\nputs 1\n",
+    ),
+    (
+        "self_attr",
+        "class Foo25a\n  attr_accessor :x\n  def init\n    self.x = 1\n    puts 2\n  end\nend\nFoo25a.new.init\n",
+    ),
+    ("index_op", "h = {}\nh[:a] = 0\nh[:a] += 1\nputs h[:a]\n"),
+    ("index_or", "h = {}\nh[:a] ||= 1\nputs h[:a]\n"),
+    ("index_and", "h = {}\nh[:a] = true\nh[:a] &&= 2\nputs h[:a]\n"),
+    ("index_multi", "h = {}\nh[1, 2] = 0\nh[1, 2] += 1\nputs h[1, 2]\n"),
+    (
+        "index_splat",
+        "a = [0, 1]\ni = [0]\na[*i] += 1\nputs a[0]\n",
+    ),
+    ("index_self", "self[0] += 1\nputs 1\n"),
+    (
+        "call_op",
+        "class Box25o\n  attr_accessor :foo\nend\nobj = Box25o.new\nobj.foo = 0\nobj.foo += 1\nputs obj.foo\n",
+    ),
+    (
+        "call_or",
+        "class Box25r\n  attr_accessor :foo\nend\nobj = Box25r.new\nobj.foo ||= 1\nputs obj.foo\n",
+    ),
+    (
+        "call_and",
+        "class Box25d\n  attr_accessor :foo\nend\nobj = Box25d.new\nobj.foo = true\nobj.foo &&= 1\nputs obj.foo\n",
+    ),
+    (
+        "call_noval_op",
+        "class Box25v\n  attr_accessor :foo\nend\nobj = Box25v.new\nobj.foo = 0\nobj.foo += 1\nputs 1\n",
+    ),
     ("break_plain", "loop do\n  break\nend\nputs 1\n"),
     ("break_value", "x = loop do\n  break 42\nend\nputs x\n"),
     ("break_multi", "x = loop do\n  break 1, 2\nend\nputs x\n"),
@@ -582,25 +662,11 @@ pub const P25_SNIPPETS: &[(&str, &str)] = &[
 ];
 
 /// `GATED` table from `p25_rescue.rs`.
-pub const P25_GATED: &[(&str, &str, &str)] = &[
-    (
-        "masgn_const_path_target_gated",
-        "class Foo25\nend\nFoo25::A, b = 1, 2\n",
-        "ConstantPathTargetNode",
-    ),
-    // Plain attribute writes gate on every frontend (no `gen_call_assign`
-    // in the backend yet); the reference compiles them.
-    (
-        "index_write_gated",
-        "a = [0]\na[0] = 1\n",
-        "attribute assignment",
-    ),
-    (
-        "attr_write_gated",
-        "class Box25w\n  attr_accessor :x\nend\nb = Box25w.new\nb.x = 1\n",
-        "attribute assignment",
-    ),
-];
+pub const P25_GATED: &[(&str, &str, &str)] = &[(
+    "masgn_const_path_target_gated",
+    "class Foo25\nend\nFoo25::A, b = 1, 2\n",
+    "ConstantPathTargetNode",
+)];
 
 /// `SNIPPETS` table from `p26_specials.rs`.
 pub const P26_SNIPPETS: &[(&str, &str)] = &[

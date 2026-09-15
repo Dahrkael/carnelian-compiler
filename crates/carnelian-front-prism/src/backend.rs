@@ -2,12 +2,12 @@
 
 use carnelian_ast::view::{
     AlternationView, ArrayPatternView, BackendNode, BeginView, BlockParamView, BlockView,
-    CallTargetView, CallView, CaptureView, CaseMatchView, CaseView, ClassView, ConstPathRead,
-    ConstPathWrite, DefView, EnsureView, FindPatternView, ForView, GuardView, HashPatternView,
-    IfView, InView, IndexTargetView, IntegerLit, KeywordParamView, LambdaView, LvarRef, LvarWrite,
-    MatchView, ModuleView, MultiTargetView, MultiWriteView, ParamsView, ProgramView, RangeView,
-    RescueModifierView, RescueView, SclassView, SimpleLit, SuperView, VarWrite, WhenView,
-    WhileView, YieldView,
+    CallTargetView, CallView, CallWriteView, CaptureView, CaseMatchView, CaseView, ClassView,
+    ConstPathRead, ConstPathWrite, DefView, EnsureView, FindPatternView, ForView, GuardView,
+    HashPatternView, IfView, InView, IndexTargetView, IndexWriteView, IntegerLit, KeywordParamView,
+    LambdaView, LogicWriteView, LvarRef, LvarWrite, MatchView, ModuleView, MultiTargetView,
+    MultiWriteView, OpWriteView, ParamsView, ProgramView, RangeView, RescueModifierView,
+    RescueView, SclassView, SimpleLit, SuperView, VarWrite, WhenView, WhileView, YieldView,
 };
 use carnelian_ast::AstNode;
 use carnelian_ast::{limbs_to_decimal, NIL_BLOCK};
@@ -844,6 +844,178 @@ impl BackendNode for PrismNode<'_> {
     fn implicit_value(&self) -> Option<Self> {
         let node = self.inner.as_implicit_node()?;
         Some(wrap(node.value()))
+    }
+
+    fn op_write(&self) -> Option<OpWriteView<Self>> {
+        if let Some(node) = self.inner.as_local_variable_operator_write_node() {
+            return Some(OpWriteView {
+                name: const_bytes(node.name()),
+                depth: node.depth(),
+                value: wrap(node.value()),
+                binary_operator: const_bytes(node.binary_operator()),
+            });
+        }
+        if let Some(node) = self.inner.as_instance_variable_operator_write_node() {
+            return Some(OpWriteView {
+                name: const_bytes(node.name()),
+                depth: 0,
+                value: wrap(node.value()),
+                binary_operator: const_bytes(node.binary_operator()),
+            });
+        }
+        if let Some(node) = self.inner.as_class_variable_operator_write_node() {
+            return Some(OpWriteView {
+                name: const_bytes(node.name()),
+                depth: 0,
+                value: wrap(node.value()),
+                binary_operator: const_bytes(node.binary_operator()),
+            });
+        }
+        if let Some(node) = self.inner.as_global_variable_operator_write_node() {
+            return Some(OpWriteView {
+                name: const_bytes(node.name()),
+                depth: 0,
+                value: wrap(node.value()),
+                binary_operator: const_bytes(node.binary_operator()),
+            });
+        }
+        let node = self.inner.as_constant_operator_write_node()?;
+        Some(OpWriteView {
+            name: const_bytes(node.name()),
+            depth: 0,
+            value: wrap(node.value()),
+            binary_operator: const_bytes(node.binary_operator()),
+        })
+    }
+
+    fn logic_write(&self) -> Option<LogicWriteView<Self>> {
+        if let Some(node) = self.inner.as_local_variable_or_write_node() {
+            return Some(LogicWriteView {
+                name: const_bytes(node.name()),
+                depth: node.depth(),
+                value: wrap(node.value()),
+            });
+        }
+        if let Some(node) = self.inner.as_local_variable_and_write_node() {
+            return Some(LogicWriteView {
+                name: const_bytes(node.name()),
+                depth: node.depth(),
+                value: wrap(node.value()),
+            });
+        }
+        if let Some(node) = self.inner.as_instance_variable_or_write_node() {
+            return Some(LogicWriteView {
+                name: const_bytes(node.name()),
+                depth: 0,
+                value: wrap(node.value()),
+            });
+        }
+        if let Some(node) = self.inner.as_instance_variable_and_write_node() {
+            return Some(LogicWriteView {
+                name: const_bytes(node.name()),
+                depth: 0,
+                value: wrap(node.value()),
+            });
+        }
+        if let Some(node) = self.inner.as_class_variable_or_write_node() {
+            return Some(LogicWriteView {
+                name: const_bytes(node.name()),
+                depth: 0,
+                value: wrap(node.value()),
+            });
+        }
+        if let Some(node) = self.inner.as_class_variable_and_write_node() {
+            return Some(LogicWriteView {
+                name: const_bytes(node.name()),
+                depth: 0,
+                value: wrap(node.value()),
+            });
+        }
+        if let Some(node) = self.inner.as_global_variable_or_write_node() {
+            return Some(LogicWriteView {
+                name: const_bytes(node.name()),
+                depth: 0,
+                value: wrap(node.value()),
+            });
+        }
+        if let Some(node) = self.inner.as_global_variable_and_write_node() {
+            return Some(LogicWriteView {
+                name: const_bytes(node.name()),
+                depth: 0,
+                value: wrap(node.value()),
+            });
+        }
+        if let Some(node) = self.inner.as_constant_or_write_node() {
+            return Some(LogicWriteView {
+                name: const_bytes(node.name()),
+                depth: 0,
+                value: wrap(node.value()),
+            });
+        }
+        let node = self.inner.as_constant_and_write_node()?;
+        Some(LogicWriteView {
+            name: const_bytes(node.name()),
+            depth: 0,
+            value: wrap(node.value()),
+        })
+    }
+
+    fn call_write(&self) -> Option<CallWriteView<Self>> {
+        if let Some(node) = self.inner.as_call_operator_write_node() {
+            return Some(CallWriteView {
+                receiver: node.receiver().map(wrap),
+                read_name: const_bytes(node.read_name()),
+                write_name: const_bytes(node.write_name()),
+                binary_operator: Some(const_bytes(node.binary_operator())),
+                value: wrap(node.value()),
+                safe_nav: node.is_safe_navigation(),
+            });
+        }
+        if let Some(node) = self.inner.as_call_or_write_node() {
+            return Some(CallWriteView {
+                receiver: node.receiver().map(wrap),
+                read_name: const_bytes(node.read_name()),
+                write_name: const_bytes(node.write_name()),
+                binary_operator: None,
+                value: wrap(node.value()),
+                safe_nav: node.is_safe_navigation(),
+            });
+        }
+        let node = self.inner.as_call_and_write_node()?;
+        Some(CallWriteView {
+            receiver: node.receiver().map(wrap),
+            read_name: const_bytes(node.read_name()),
+            write_name: const_bytes(node.write_name()),
+            binary_operator: None,
+            value: wrap(node.value()),
+            safe_nav: node.is_safe_navigation(),
+        })
+    }
+
+    fn index_write(&self) -> Option<IndexWriteView<Self>> {
+        if let Some(node) = self.inner.as_index_operator_write_node() {
+            return Some(IndexWriteView {
+                receiver: node.receiver().map(wrap),
+                args: node.arguments().map(|arguments| wrap(arguments.as_node())),
+                value: wrap(node.value()),
+                binary_operator: Some(const_bytes(node.binary_operator())),
+            });
+        }
+        if let Some(node) = self.inner.as_index_or_write_node() {
+            return Some(IndexWriteView {
+                receiver: node.receiver().map(wrap),
+                args: node.arguments().map(|arguments| wrap(arguments.as_node())),
+                value: wrap(node.value()),
+                binary_operator: None,
+            });
+        }
+        let node = self.inner.as_index_and_write_node()?;
+        Some(IndexWriteView {
+            receiver: node.receiver().map(wrap),
+            args: node.arguments().map(|arguments| wrap(arguments.as_node())),
+            value: wrap(node.value()),
+            binary_operator: None,
+        })
     }
 
     fn return_args(&self) -> Option<Option<Self>> {
