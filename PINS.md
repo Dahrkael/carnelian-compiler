@@ -18,3 +18,4 @@ A CI pin test fails if the locked reference versions differ from this file.
 ## Compatibility changelog
 
 - `0.1.0` (released 2026-09-15, tag `v0.1.0`): P0–P4 + P2.6 pattern matching + DEBUG section + deferred call threading. Initial tuple (P0); MRI parser pin added in P4.
+- `0.1.1` (tag `v0.1.1`): same tuple; adds the missing codegen arms for real-world code (issue #2): `return`/`break`/`next`/`redo`, ranges, parentheses, attribute/index/call assignment, op-assign and `||=`/`&&=` family.
