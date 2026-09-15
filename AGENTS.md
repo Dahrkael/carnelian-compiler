@@ -53,6 +53,9 @@ Guidelines for working on this repo.
 - Use ripgrep when available for searches
 - Never run merges (including merge commits on pull) or delete branches
   without the user's explicit confirmation.
+- Never push branches, tags or commits to `origin` (or any remote),
+  directly or through `gh`, without the user's explicit confirmation.
+  Read-only `gh` use (issues, PRs, checks, releases) is fine.
 - Big features, big refactors or potentially breaking changes need to be done
   in a new worktree with a new "feature/{name_here}" branch created just for
   that under the /tmp folder. Once the work is done and everything is
