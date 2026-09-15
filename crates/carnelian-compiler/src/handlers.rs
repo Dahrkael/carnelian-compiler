@@ -428,6 +428,9 @@ fn codegen_dispatch<N: BackendNode>(
         "ArrayNode" => gen_array(cg, node, val),
         "HashNode" | "KeywordHashNode" => gen_hash_lit(cg, node, val),
         "CaseNode" => gen_case(cg, node, val),
+        "CaseMatchNode" => gen_case_match(cg, node, val),
+        "MatchPredicateNode" => gen_match_predicate(cg, node, val),
+        "MatchRequiredNode" => gen_match_required(cg, node, val),
         "InterpolatedStringNode" => gen_interp_string(cg, node, val),
         "EmbeddedStatementsNode" => gen_branch(cg, node.embedded_body(), val),
         "EmbeddedVariableNode" => {
@@ -2542,6 +2545,9 @@ fn codegen_supports(kind: &str) -> bool {
             | "HashNode"
             | "KeywordHashNode"
             | "CaseNode"
+            | "CaseMatchNode"
+            | "MatchPredicateNode"
+            | "MatchRequiredNode"
             | "InterpolatedStringNode"
             | "EmbeddedStatementsNode"
             | "EmbeddedVariableNode"
@@ -3758,6 +3764,1104 @@ fn gen_case<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), 
         if head.is_some() {
             cg.current().1.pop_n(1)?;
         }
+    }
+    Ok(())
+}
+
+/// Pattern nesting bound (`codegen_pattern`, `"too complex pattern"`).
+fn too_complex_pattern() -> Diagnostic {
+    Diagnostic {
+        message: "too complex pattern".to_owned(),
+        start: 0,
+        end: 0,
+    }
+}
+
+/// Chain a pattern failure jump, keeping the old chain when the peephole
+/// emits nothing (`gen_pattern_fail_jmp`).
+fn gen_pattern_fail_jmp(
+    cg: &mut Codegen,
+    op: u8,
+    a: u16,
+    fail_pos: &mut u32,
+    val: bool,
+) -> Result<(), Diagnostic> {
+    let (session, scope) = cg.current();
+    let tmp = scope.genjmp2(session, op, a, *fail_pos, val)?;
+    if tmp != JMPLINK_START {
+        *fail_pos = tmp;
+    }
+    Ok(())
+}
+
+/// Fail unless `value` answers `===` for the value at `target`
+/// (`gen_pattern_eqq`).
+fn gen_pattern_eqq<N: BackendNode>(
+    cg: &mut Codegen,
+    value: N,
+    target: u16,
+    fail_pos: &mut u32,
+) -> Result<(), Diagnostic> {
+    codegen(cg, value, true)?;
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.gen_move(session, dst, target, false)?;
+        scope.push_n(2)?;
+        scope.pop_n(3)?;
+        let sym = scope.new_sym(session, b"===")?;
+        let dst = scope.cursp();
+        scope.genop_3(session, opcode::OP_SEND, dst, sym, 1)?;
+    }
+    let cur = cg.current().1.cursp();
+    let (session, scope) = cg.current();
+    let pos = scope.genjmp2(session, opcode::OP_JMPNOT, cur, *fail_pos, true)?;
+    *fail_pos = pos;
+    Ok(())
+}
+
+/// Fail unless the value at `target` answers `mid`
+/// (`gen_pattern_respond_to`). `cache` is the `case/in` register keeping
+/// the answer across clauses (`None` for patterns with none).
+fn gen_pattern_respond_to(
+    cg: &mut Codegen,
+    target: u16,
+    mid: &[u8],
+    fail_pos: &mut u32,
+    cache: Option<u16>,
+) -> Result<(), Diagnostic> {
+    let reg = cg.current().1.cursp();
+    {
+        let (session, scope) = cg.current();
+        scope.gen_move(session, reg, target, false)?;
+        scope.push_n(1)?;
+        let dst = scope.cursp();
+        let sym = scope.new_sym(session, mid)?;
+        scope.genop_2(session, opcode::OP_LOADSYM, dst, sym)?;
+        scope.push_n(1)?;
+        scope.push_n(1)?;
+        scope.pop_n(1)?;
+        scope.sp = reg;
+        let sym = scope.new_sym(session, b"respond_to?")?;
+        scope.genop_3(session, opcode::OP_SEND, reg, sym, 1)?;
+    }
+    if let Some(slot) = cache {
+        let (session, scope) = cg.current();
+        scope.gen_move(session, slot, reg, true)?;
+    }
+    let (session, scope) = cg.current();
+    let pos = scope.genjmp2(session, opcode::OP_JMPNOT, reg, *fail_pos, true)?;
+    *fail_pos = pos;
+    Ok(())
+}
+
+/// Send `deconstruct` to `target`, leaving the array at `cursp()`
+/// (`gen_pattern_deconstruct`).
+fn gen_pattern_deconstruct(
+    cg: &mut Codegen,
+    target: u16,
+    fail_pos: &mut u32,
+    cache: Option<u16>,
+) -> Result<(), Diagnostic> {
+    let reg = cg.current().1.cursp();
+    let mut have = JMPLINK_START;
+    if let Some(slot) = cache {
+        let (session, scope) = cg.current();
+        let ask = scope.genjmp2(session, opcode::OP_JMPNIL, slot, JMPLINK_START, true)?;
+        let (session, scope) = cg.current();
+        let pos = scope.genjmp2(session, opcode::OP_JMPNOT, slot, *fail_pos, true)?;
+        *fail_pos = pos;
+        {
+            let (session, scope) = cg.current();
+            scope.gen_move(session, reg, slot, true)?;
+        }
+        have = cg.current().1.genjmp(opcode::OP_JMP, JMPLINK_START)?;
+        cg.current().1.dispatch(ask)?;
+    }
+    gen_pattern_respond_to(cg, target, b"deconstruct", fail_pos, cache)?;
+    {
+        let (session, scope) = cg.current();
+        scope.gen_move(session, reg, target, false)?;
+        scope.push_n(2)?;
+        scope.pop_n(2)?;
+        let sym = scope.new_sym(session, b"deconstruct")?;
+        scope.genop_3(session, opcode::OP_SEND, reg, sym, 0)?;
+    }
+    if let Some(slot) = cache {
+        {
+            let (session, scope) = cg.current();
+            scope.gen_move(session, slot, reg, true)?;
+        }
+        cg.current().1.dispatch(have)?;
+    }
+    Ok(())
+}
+
+/// Whether the pattern at the top of an `in` clause would send
+/// `deconstruct` to the subject (`pattern_deconstructs`).
+fn pattern_deconstructs<N: BackendNode>(pattern: &N) -> bool {
+    let mut current = pattern.clone();
+    loop {
+        match current.kind_name() {
+            "IfNode" | "UnlessNode" => {
+                let Some(guard) = current.guard_view() else {
+                    return false;
+                };
+                current = guard.inner;
+            }
+            "CapturePatternNode" => {
+                let Some(view) = current.capture_view() else {
+                    return false;
+                };
+                current = view.value;
+            }
+            "AlternationPatternNode" => {
+                let Some(view) = current.alternation_view() else {
+                    return false;
+                };
+                if pattern_deconstructs(&view.left) {
+                    return true;
+                }
+                current = view.right;
+            }
+            "ArrayPatternNode" | "FindPatternNode" => return true,
+            _ => return false,
+        }
+    }
+}
+
+/// Bind a captured value to its target local (`gen_pattern_bind`).
+fn gen_pattern_bind<N: BackendNode>(cg: &mut Codegen, var: N, src: u16) -> Result<(), Diagnostic> {
+    let Some(target) = var.lvar_target() else {
+        return Err(unsupported(&var, "pattern binding"));
+    };
+    let depth = target.depth + u32::from(cg.current().1.for_depth);
+    gen_assignment_lvar(cg, src, &target.name, depth, true)
+}
+
+/// Pattern walk with its own nesting count (`codegen_pattern`).
+fn codegen_pattern<N: BackendNode>(
+    cg: &mut Codegen,
+    pattern: N,
+    target: u16,
+    fail_pos: &mut u32,
+    known_array_len: i32,
+    cache: Option<u16>,
+) -> Result<(), Diagnostic> {
+    let rlev = cg.current().1.rlev;
+    cg.current().1.rlev += 1;
+    if cg.current().1.rlev > CODEGEN_LEVEL_MAX {
+        cg.current().1.rlev = rlev;
+        return Err(too_complex_pattern());
+    }
+    let result = codegen_pattern_1(cg, pattern, target, fail_pos, known_array_len, cache);
+    cg.current().1.rlev = rlev;
+    result
+}
+
+/// One pattern (`codegen_pattern_1`): value tests, bindings, guards,
+/// alternation, capture, pins, array/hash/find shapes.
+fn codegen_pattern_1<N: BackendNode>(
+    cg: &mut Codegen,
+    pattern: N,
+    target: u16,
+    fail_pos: &mut u32,
+    known_array_len: i32,
+    cache: Option<u16>,
+) -> Result<(), Diagnostic> {
+    cg.current().1.new_label();
+    if pattern.kind_name() == "IfNode" || pattern.kind_name() == "UnlessNode" {
+        return gen_pattern_guard(cg, pattern, target, fail_pos, known_array_len, cache);
+    }
+    match pattern.kind_name() {
+        "IntegerNode"
+        | "FloatNode"
+        | "RationalNode"
+        | "ImaginaryNode"
+        | "StringNode"
+        | "InterpolatedStringNode"
+        | "XStringNode"
+        | "SymbolNode"
+        | "InterpolatedSymbolNode"
+        | "RegularExpressionNode"
+        | "InterpolatedRegularExpressionNode"
+        | "RangeNode"
+        | "TrueNode"
+        | "FalseNode"
+        | "NilNode"
+        | "ConstantReadNode"
+        | "ConstantPathNode" => {
+            codegen(cg, pattern, true)?;
+            {
+                let (session, scope) = cg.current();
+                let dst = scope.cursp();
+                scope.gen_move(session, dst, target, false)?;
+                scope.push_n(2)?;
+                scope.pop_n(3)?;
+                let sym = scope.new_sym(session, b"===")?;
+                let dst = scope.cursp();
+                scope.genop_3(session, opcode::OP_SEND, dst, sym, 1)?;
+            }
+            let cur = cg.current().1.cursp();
+            let (session, scope) = cg.current();
+            let pos = scope.genjmp2(session, opcode::OP_JMPNOT, cur, *fail_pos, true)?;
+            *fail_pos = pos;
+            Ok(())
+        }
+        "LocalVariableTargetNode" => gen_pattern_bind(cg, pattern, target),
+        "ImplicitNode" => {
+            let Some(inner) = pattern.implicit_value() else {
+                return Err(unsupported(&pattern, "implicit pattern"));
+            };
+            codegen_pattern(cg, inner, target, fail_pos, known_array_len, None)
+        }
+        "AlternationPatternNode" => {
+            gen_pattern_alternation(cg, pattern, target, fail_pos, known_array_len, cache)
+        }
+        "CapturePatternNode" => {
+            let Some(view) = pattern.capture_view() else {
+                return Err(unsupported(&pattern, "capture pattern"));
+            };
+            codegen_pattern(cg, view.value, target, fail_pos, known_array_len, cache)?;
+            gen_pattern_bind(cg, view.target, target)
+        }
+        "PinnedVariableNode" => {
+            let Some(inner) = pattern.pinned_var() else {
+                return Err(unsupported(&pattern, "pinned variable"));
+            };
+            gen_pattern_eqq(cg, inner, target, fail_pos)
+        }
+        "PinnedExpressionNode" => {
+            let Some(inner) = pattern.pinned_expr() else {
+                return Err(unsupported(&pattern, "pinned expression"));
+            };
+            gen_pattern_eqq(cg, inner, target, fail_pos)
+        }
+        "ArrayPatternNode" => {
+            gen_array_pattern(cg, pattern, target, fail_pos, known_array_len, cache)
+        }
+        "HashPatternNode" => gen_hash_pattern(cg, pattern, target, fail_pos),
+        "FindPatternNode" => gen_find_pattern(cg, pattern, target, fail_pos, cache),
+        _ => {
+            let pos = cg.current().1.genjmp(opcode::OP_JMP, *fail_pos)?;
+            *fail_pos = pos;
+            Ok(())
+        }
+    }
+}
+
+/// Guard wrapper (`if`/`unless` around the inner pattern).
+fn gen_pattern_guard<N: BackendNode>(
+    cg: &mut Codegen,
+    pattern: N,
+    target: u16,
+    fail_pos: &mut u32,
+    known_array_len: i32,
+    cache: Option<u16>,
+) -> Result<(), Diagnostic> {
+    let Some(guard) = pattern.guard_view() else {
+        return Err(unsupported(&pattern, "pattern guard"));
+    };
+    codegen_pattern(cg, guard.inner, target, fail_pos, known_array_len, cache)?;
+    codegen(cg, guard.condition, true)?;
+    cg.current().1.pop_n(1)?;
+    let cur = cg.current().1.cursp();
+    let op = if guard.is_unless {
+        opcode::OP_JMPIF
+    } else {
+        opcode::OP_JMPNOT
+    };
+    gen_pattern_fail_jmp(cg, op, cur, fail_pos, false)
+}
+
+/// Alternation with the `JMPNOT`-to-`JMPIF` success-chain rewrite.
+fn gen_pattern_alternation<N: BackendNode>(
+    cg: &mut Codegen,
+    pattern: N,
+    target: u16,
+    fail_pos: &mut u32,
+    known_array_len: i32,
+    cache: Option<u16>,
+) -> Result<(), Diagnostic> {
+    let Some(view) = pattern.alternation_view() else {
+        return Err(unsupported(&pattern, "alternation pattern"));
+    };
+    let left_is_alt = view.left.kind_name() == "AlternationPatternNode";
+    let mut left_fail = JMPLINK_START;
+    let mut success_pos = JMPLINK_START;
+    codegen_pattern(
+        cg,
+        view.left,
+        target,
+        &mut left_fail,
+        known_array_len,
+        cache,
+    )?;
+    let tail_is_jmpnot = {
+        let scope = &cg.current().1;
+        !left_is_alt
+            && left_fail != JMPLINK_START
+            && left_fail >= 2
+            && left_fail + 2 == scope.pc
+            && scope.iseq[(left_fail - 2) as usize] == opcode::OP_JMPNOT
+    };
+    if tail_is_jmpnot {
+        let prev_offset = i16::from_be_bytes([
+            cg.current().1.iseq[left_fail as usize],
+            cg.current().1.iseq[(left_fail + 1) as usize],
+        ]);
+        let next_addr = (left_fail + 2) as i32 + i32::from(prev_offset);
+        let prev_link = if next_addr == 0 {
+            JMPLINK_START
+        } else {
+            next_addr as u32
+        };
+        cg.current().1.iseq[(left_fail - 2) as usize] = opcode::OP_JMPIF;
+        cg.current().1.emit_s(left_fail, 0)?;
+        success_pos = left_fail;
+        left_fail = prev_link;
+    } else {
+        success_pos = cg.current().1.genjmp(opcode::OP_JMP, success_pos)?;
+    }
+    if left_fail != JMPLINK_START {
+        cg.current().1.dispatch_linked(left_fail)?;
+    }
+    codegen_pattern(cg, view.right, target, fail_pos, known_array_len, cache)?;
+    if success_pos != JMPLINK_START {
+        cg.current().1.dispatch_linked(success_pos)?;
+    }
+    Ok(())
+}
+
+/// Pre-rest elements of an array pattern through `AREF`.
+fn gen_array_pattern_pres<N: BackendNode>(
+    cg: &mut Codegen,
+    requireds: &[N],
+    base_reg: u16,
+    fail_pos: &mut u32,
+) -> Result<(), Diagnostic> {
+    let mut base = i32::from(base_reg);
+    let mut idx = 0;
+    let scratch = gen_aref_scratch(cg, requireds.len() as i32)?;
+    for element in requireds {
+        if idx == 255 {
+            base = gen_aref_rebase(cg, base, scratch)?;
+            idx = 0;
+        }
+        let sp = cg.current().1.cursp();
+        {
+            let (session, scope) = cg.current();
+            scope.genop_3(session, opcode::OP_AREF, sp, base as u16, idx as u8)?;
+            scope.push_n(1)?;
+        }
+        codegen_pattern(cg, element.clone(), sp, fail_pos, -1, None)?;
+        cg.current().1.pop_n(1)?;
+        idx += 1;
+    }
+    if scratch >= 0 {
+        cg.current().1.pop_n(1)?;
+    }
+    Ok(())
+}
+
+/// Rest binding of an array pattern (`arr[pre..-(post+1)]`).
+fn gen_array_pattern_rest<N: BackendNode>(
+    cg: &mut Codegen,
+    rest: &Option<N>,
+    arr_reg: u16,
+    pre_len: i32,
+    post_len: i32,
+) -> Result<(), Diagnostic> {
+    let Some(node) = rest else {
+        return Ok(());
+    };
+    if node.kind_name() != "SplatNode" {
+        return Ok(());
+    }
+    let Some(Some(inner)) = node.splat_value() else {
+        return Ok(());
+    };
+    if inner.kind_name() != "LocalVariableTargetNode" {
+        return Ok(());
+    }
+    let sp_save = cg.current().1.cursp();
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.gen_move(session, dst, arr_reg, false)?;
+        scope.push_n(1)?;
+        let dst = scope.cursp();
+        scope.gen_int(session, dst, i64::from(pre_len))?;
+        scope.push_n(1)?;
+        let dst = scope.cursp();
+        let end: i64 = if post_len > 0 {
+            i64::from(-(post_len + 1))
+        } else {
+            -1
+        };
+        scope.gen_int(session, dst, end)?;
+        let dst = scope.cursp();
+        scope.genop_1(session, opcode::OP_RANGE_INC, dst - 1)?;
+        scope.push_n(1)?;
+        scope.pop_n(1)?;
+        scope.sp = sp_save;
+        let dst = scope.cursp();
+        let sym = scope.new_sym(session, b"[]")?;
+        scope.genop_3(session, opcode::OP_SEND, dst, sym, 1)?;
+    }
+    gen_pattern_bind(cg, inner, sp_save)
+}
+
+/// Post-rest elements of an array pattern through negative `GETIDX`.
+fn gen_array_pattern_posts<N: BackendNode>(
+    cg: &mut Codegen,
+    posts: &[N],
+    arr_reg: u16,
+    fail_pos: &mut u32,
+) -> Result<(), Diagnostic> {
+    let post_len = posts.len() as i32;
+    for (index, element) in posts.iter().enumerate() {
+        {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.gen_move(session, dst, arr_reg, false)?;
+            scope.push_n(1)?;
+            let dst = scope.cursp();
+            scope.gen_int(session, dst, i64::from(-(post_len - index as i32)))?;
+            scope.push_n(1)?;
+            scope.pop_n(1)?;
+            let dst = scope.cursp();
+            scope.genop_1(session, opcode::OP_GETIDX, dst - 1)?;
+        }
+        let reg = cg.current().1.cursp() - 1;
+        codegen_pattern(cg, element.clone(), reg, fail_pos, -1, None)?;
+        cg.current().1.pop_n(1)?;
+    }
+    Ok(())
+}
+
+/// Array pattern, with the known-length fast path for array literals.
+fn gen_array_pattern<N: BackendNode>(
+    cg: &mut Codegen,
+    pattern: N,
+    target: u16,
+    fail_pos: &mut u32,
+    known_array_len: i32,
+    cache: Option<u16>,
+) -> Result<(), Diagnostic> {
+    let Some(view) = pattern.array_pattern_view() else {
+        return Err(unsupported(&pattern, "array pattern"));
+    };
+    if let Some(constant) = view.constant {
+        gen_pattern_eqq(cg, constant, target, fail_pos)?;
+    }
+    let pre_len = view.requireds.len() as i32;
+    let post_len = view.posts.len() as i32;
+    if known_array_len >= 0 {
+        if view.rest.is_none() {
+            if known_array_len != pre_len + post_len {
+                let pos = cg.current().1.genjmp(opcode::OP_JMP, *fail_pos)?;
+                *fail_pos = pos;
+                return Ok(());
+            }
+        } else if known_array_len < pre_len + post_len {
+            let pos = cg.current().1.genjmp(opcode::OP_JMP, *fail_pos)?;
+            *fail_pos = pos;
+            return Ok(());
+        }
+        gen_array_pattern_pres(cg, &view.requireds, target, fail_pos)?;
+        gen_array_pattern_rest(cg, &view.rest, target, pre_len, post_len)?;
+        gen_array_pattern_posts(cg, &view.posts, target, fail_pos)?;
+        return Ok(());
+    }
+    gen_pattern_deconstruct(cg, target, fail_pos, cache)?;
+    let arr_reg = cg.current().1.cursp();
+    cg.current().1.push_n(1)?;
+    gen_pattern_fail_jmp(cg, opcode::OP_JMPNIL, arr_reg, fail_pos, false)?;
+    {
+        let chk = cg.current().1.cursp();
+        {
+            let (session, scope) = cg.current();
+            scope.gen_move(session, chk, arr_reg, false)?;
+            scope.push_n(2)?;
+            scope.pop_n(2)?;
+            let sym = scope.new_sym(session, b"size")?;
+            scope.genop_3(session, opcode::OP_SEND, chk, sym, 0)?;
+        }
+        {
+            let (session, scope) = cg.current();
+            scope.gen_int(session, chk + 1, i64::from(pre_len + post_len))?;
+        }
+        {
+            let (session, scope) = cg.current();
+            let op = if view.rest.is_none() {
+                opcode::OP_EQ
+            } else {
+                opcode::OP_GE
+            };
+            scope.genop_1(session, op, chk)?;
+        }
+        let (session, scope) = cg.current();
+        let pos = scope.genjmp2(session, opcode::OP_JMPNOT, chk, *fail_pos, true)?;
+        *fail_pos = pos;
+    }
+    gen_array_pattern_pres(cg, &view.requireds, arr_reg, fail_pos)?;
+    gen_array_pattern_rest(cg, &view.rest, arr_reg, pre_len, post_len)?;
+    gen_array_pattern_posts(cg, &view.posts, arr_reg, fail_pos)?;
+    cg.current().1.pop_n(1)?;
+    Ok(())
+}
+
+/// Hash pattern through `deconstruct_keys` and `__pat_values`.
+fn gen_hash_pattern<N: BackendNode>(
+    cg: &mut Codegen,
+    pattern: N,
+    target: u16,
+    fail_pos: &mut u32,
+) -> Result<(), Diagnostic> {
+    let Some(view) = pattern.hash_pattern_view() else {
+        return Err(unsupported(&pattern, "hash pattern"));
+    };
+    if let Some(constant) = view.constant {
+        gen_pattern_eqq(cg, constant, target, fail_pos)?;
+    }
+    let mut num_keys: u16 = 0;
+    for element in &view.elements {
+        if element.kind_name() == "AssocNode" {
+            num_keys += 1;
+        }
+    }
+    let has_rest = view.rest.is_some();
+    let has_double_nil = view
+        .rest
+        .as_ref()
+        .is_some_and(|rest| rest.kind_name() == "NoKeywordsParameterNode");
+    gen_pattern_respond_to(cg, target, b"deconstruct_keys", fail_pos, None)?;
+    let hash_reg = cg.current().1.cursp();
+    {
+        let (session, scope) = cg.current();
+        scope.gen_move(session, hash_reg, target, false)?;
+        scope.push_n(1)?;
+    }
+    if !has_rest && num_keys > 0 {
+        let keys_base = cg.current().1.cursp();
+        for element in &view.elements {
+            if element.kind_name() != "AssocNode" {
+                continue;
+            }
+            let Some((key, _)) = element.assoc_pair() else {
+                return Err(unsupported(element, "hash pattern key"));
+            };
+            codegen(cg, key, true)?;
+        }
+        {
+            let (session, scope) = cg.current();
+            scope.pop_n(num_keys)?;
+            scope.genop_2(session, opcode::OP_ARRAY, keys_base, num_keys)?;
+            scope.push_n(1)?;
+            scope.push_n(1)?;
+            scope.pop_n(1)?;
+            scope.sp = hash_reg;
+            let sym = scope.new_sym(session, b"deconstruct_keys")?;
+            scope.genop_3(session, opcode::OP_SEND, hash_reg, sym, 1)?;
+        }
+    } else {
+        let dst = cg.current().1.cursp();
+        {
+            let (session, scope) = cg.current();
+            scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+            scope.push_n(1)?;
+            scope.push_n(1)?;
+            scope.pop_n(1)?;
+            scope.sp = hash_reg;
+            let sym = scope.new_sym(session, b"deconstruct_keys")?;
+            scope.genop_3(session, opcode::OP_SEND, hash_reg, sym, 1)?;
+        }
+    }
+    cg.current().1.push_n(1)?;
+    {
+        let vals_reg = cg.current().1.cursp();
+        {
+            let (session, scope) = cg.current();
+            scope.gen_move(session, vals_reg, hash_reg, false)?;
+            scope.push_n(1)?;
+        }
+        let keys_base = cg.current().1.cursp();
+        for element in &view.elements {
+            if element.kind_name() != "AssocNode" {
+                continue;
+            }
+            let Some((key, _)) = element.assoc_pair() else {
+                return Err(unsupported(element, "hash pattern key"));
+            };
+            codegen(cg, key, true)?;
+        }
+        {
+            let (session, scope) = cg.current();
+            scope.pop_n(num_keys)?;
+            scope.genop_2(session, opcode::OP_ARRAY, keys_base, num_keys)?;
+            scope.push_n(1)?;
+            scope.push_n(1)?;
+            scope.pop_n(1)?;
+            scope.sp = vals_reg;
+            let sym = scope.new_sym(session, b"__pat_values")?;
+            scope.genop_3(session, opcode::OP_SEND, vals_reg, sym, 1)?;
+            scope.push_n(1)?;
+        }
+        {
+            let (session, scope) = cg.current();
+            let pos = scope.genjmp2(session, opcode::OP_JMPNOT, vals_reg, *fail_pos, true)?;
+            *fail_pos = pos;
+        }
+        let loop_sp = cg.current().1.cursp();
+        let mut key_idx: i64 = 0;
+        for element in &view.elements {
+            if element.kind_name() != "AssocNode" {
+                continue;
+            }
+            let Some((_, sub)) = element.assoc_pair() else {
+                return Err(unsupported(element, "hash pattern key"));
+            };
+            {
+                let (session, scope) = cg.current();
+                let val_reg = scope.cursp();
+                scope.gen_move(session, val_reg, vals_reg, false)?;
+                scope.push_n(1)?;
+                let dst = scope.cursp();
+                scope.gen_int(session, dst, key_idx)?;
+                scope.push_n(1)?;
+                scope.push_n(1)?;
+                scope.pop_n(1)?;
+                scope.sp = val_reg;
+                let sym = scope.new_sym(session, b"[]")?;
+                scope.genop_3(session, opcode::OP_SEND, val_reg, sym, 1)?;
+                scope.push_n(1)?;
+            }
+            let val_reg = cg.current().1.cursp() - 1;
+            codegen_pattern(cg, sub, val_reg, fail_pos, -1, None)?;
+            cg.current().1.sp = loop_sp;
+            key_idx += 1;
+        }
+        cg.current().1.pop_n(1)?;
+    }
+    if has_double_nil || (!has_rest && num_keys == 0) {
+        let chk = cg.current().1.cursp();
+        {
+            let (session, scope) = cg.current();
+            scope.gen_move(session, chk, hash_reg, false)?;
+            scope.push_n(2)?;
+            scope.pop_n(2)?;
+            let sym = scope.new_sym(session, b"size")?;
+            scope.genop_3(session, opcode::OP_SEND, chk, sym, 0)?;
+        }
+        {
+            let (session, scope) = cg.current();
+            scope.gen_int(session, chk + 1, i64::from(num_keys))?;
+        }
+        {
+            let (session, scope) = cg.current();
+            scope.genop_1(session, opcode::OP_EQ, chk)?;
+        }
+        let (session, scope) = cg.current();
+        let pos = scope.genjmp2(session, opcode::OP_JMPNOT, chk, *fail_pos, true)?;
+        *fail_pos = pos;
+    } else if has_rest && !has_double_nil {
+        if let Some(rest) = &view.rest {
+            if rest.kind_name() == "AssocSplatNode" {
+                let bound = rest.assoc_splat_value().is_some_and(|inner| match inner {
+                    Some(node) => node.kind_name() == "LocalVariableTargetNode",
+                    None => false,
+                });
+                if bound {
+                    let Some(Some(target_node)) = rest.assoc_splat_value() else {
+                        return Err(unsupported(rest, "hash rest pattern"));
+                    };
+                    let recv = cg.current().1.cursp();
+                    {
+                        let (session, scope) = cg.current();
+                        scope.gen_move(session, recv, hash_reg, false)?;
+                        scope.push_n(1)?;
+                    }
+                    if num_keys > 0 {
+                        let keys_base = cg.current().1.cursp();
+                        for element in &view.elements {
+                            if element.kind_name() != "AssocNode" {
+                                continue;
+                            }
+                            let Some((key, _)) = element.assoc_pair() else {
+                                return Err(unsupported(element, "hash pattern key"));
+                            };
+                            codegen(cg, key, true)?;
+                        }
+                        {
+                            let (session, scope) = cg.current();
+                            scope.pop_n(num_keys)?;
+                            scope.genop_2(session, opcode::OP_ARRAY, keys_base, num_keys)?;
+                            scope.push_n(1)?;
+                            scope.push_n(1)?;
+                            scope.pop_n(1)?;
+                            scope.sp = recv;
+                            let sym = scope.new_sym(session, b"__except")?;
+                            scope.genop_3(session, opcode::OP_SEND, recv, sym, 1)?;
+                        }
+                    } else {
+                        let (session, scope) = cg.current();
+                        scope.push_n(1)?;
+                        scope.pop_n(1)?;
+                        scope.sp = recv;
+                        let sym = scope.new_sym(session, b"dup")?;
+                        scope.genop_3(session, opcode::OP_SEND, recv, sym, 0)?;
+                    }
+                    gen_pattern_bind(cg, target_node, recv)?;
+                }
+            }
+        }
+    }
+    cg.current().1.pop_n(1)?;
+    Ok(())
+}
+
+/// Find pattern (`*pre, mid, *post`) as a search loop.
+fn gen_find_pattern<N: BackendNode>(
+    cg: &mut Codegen,
+    pattern: N,
+    target: u16,
+    fail_pos: &mut u32,
+    cache: Option<u16>,
+) -> Result<(), Diagnostic> {
+    let Some(view) = pattern.find_pattern_view() else {
+        return Err(unsupported(&pattern, "find pattern"));
+    };
+    let elems_len = view.requireds.len() as i32;
+    if let Some(constant) = view.constant {
+        gen_pattern_eqq(cg, constant, target, fail_pos)?;
+    }
+    gen_pattern_deconstruct(cg, target, fail_pos, cache)?;
+    let arr_reg = cg.current().1.cursp();
+    cg.current().1.push_n(1)?;
+    gen_pattern_fail_jmp(cg, opcode::OP_JMPNIL, arr_reg, fail_pos, false)?;
+    {
+        let dst = cg.current().1.cursp();
+        {
+            let (session, scope) = cg.current();
+            scope.gen_move(session, dst, arr_reg, false)?;
+            scope.push_n(2)?;
+            scope.pop_n(2)?;
+            let sym = scope.new_sym(session, b"size")?;
+            scope.genop_3(session, opcode::OP_SEND, dst, sym, 0)?;
+        }
+        {
+            let (session, scope) = cg.current();
+            scope.gen_int(session, dst + 1, i64::from(elems_len))?;
+        }
+        {
+            let (session, scope) = cg.current();
+            scope.genop_1(session, opcode::OP_GE, dst)?;
+        }
+        let (session, scope) = cg.current();
+        let pos = scope.genjmp2(session, opcode::OP_JMPNOT, dst, *fail_pos, true)?;
+        *fail_pos = pos;
+    }
+    let idx_reg = cg.current().1.cursp();
+    {
+        let (session, scope) = cg.current();
+        scope.gen_int(session, idx_reg, 0)?;
+        scope.push_n(1)?;
+    }
+    let loop_start = cg.current().1.new_label();
+    let mut match_fail = JMPLINK_START;
+    {
+        let dst = cg.current().1.cursp();
+        {
+            let (session, scope) = cg.current();
+            scope.gen_move(session, dst, arr_reg, false)?;
+            scope.push_n(2)?;
+            scope.pop_n(2)?;
+            let sym = scope.new_sym(session, b"size")?;
+            scope.genop_3(session, opcode::OP_SEND, dst, sym, 0)?;
+        }
+        {
+            let (session, scope) = cg.current();
+            scope.gen_int(session, dst + 1, i64::from(elems_len))?;
+            scope.genop_1(session, opcode::OP_SUB, dst)?;
+        }
+        {
+            let (session, scope) = cg.current();
+            scope.gen_move(session, dst + 1, idx_reg, false)?;
+            scope.genop_1(session, opcode::OP_GE, dst)?;
+        }
+        let (session, scope) = cg.current();
+        let pos = scope.genjmp2(session, opcode::OP_JMPNOT, dst, *fail_pos, true)?;
+        *fail_pos = pos;
+    }
+    for (index, element) in view.requireds.iter().enumerate() {
+        {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.gen_move(session, dst, arr_reg, false)?;
+            scope.push_n(1)?;
+            if index == 0 {
+                let dst = scope.cursp();
+                scope.gen_move(session, dst, idx_reg, false)?;
+            } else {
+                let dst = scope.cursp();
+                scope.gen_move(session, dst, idx_reg, false)?;
+                scope.gen_int(session, dst + 1, index as i64)?;
+                scope.genop_1(session, opcode::OP_ADD, dst)?;
+            }
+            scope.push_n(2)?;
+            scope.pop_n(2)?;
+            let dst = scope.cursp();
+            scope.genop_1(session, opcode::OP_GETIDX, dst - 1)?;
+        }
+        let elem_reg = cg.current().1.cursp() - 1;
+        codegen_pattern(cg, element.clone(), elem_reg, &mut match_fail, -1, None)?;
+        cg.current().1.pop_n(1)?;
+    }
+    gen_find_pattern_end(cg, &view.left, arr_reg, idx_reg, elems_len, true)?;
+    gen_find_pattern_end(cg, &view.right, arr_reg, idx_reg, elems_len, false)?;
+    let loop_end = cg.current().1.genjmp(opcode::OP_JMP, JMPLINK_START)?;
+    if match_fail != JMPLINK_START {
+        cg.current().1.dispatch_linked(match_fail)?;
+    }
+    {
+        let (session, scope) = cg.current();
+        scope.genop_2(session, opcode::OP_ADDI, idx_reg, 1)?;
+    }
+    cg.current().1.genjmp(opcode::OP_JMP, loop_start)?;
+    cg.current().1.dispatch(loop_end)?;
+    cg.current().1.pop_n(1)?;
+    cg.current().1.pop_n(1)?;
+    Ok(())
+}
+
+/// One rest binding of a find pattern (`arr[0...idx]`, `arr[idx+len..-1]`).
+fn gen_find_pattern_end<N: BackendNode>(
+    cg: &mut Codegen,
+    end: &N,
+    arr_reg: u16,
+    idx_reg: u16,
+    elems_len: i32,
+    is_pre: bool,
+) -> Result<(), Diagnostic> {
+    if end.kind_name() != "SplatNode" {
+        return Ok(());
+    }
+    let Some(Some(inner)) = end.splat_value() else {
+        return Ok(());
+    };
+    if inner.kind_name() != "LocalVariableTargetNode" {
+        return Ok(());
+    }
+    if is_pre {
+        {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.gen_move(session, dst, arr_reg, false)?;
+            scope.push_n(1)?;
+            let dst = scope.cursp();
+            scope.gen_int(session, dst, 0)?;
+            scope.push_n(1)?;
+            let dst = scope.cursp();
+            scope.gen_move(session, dst, idx_reg, false)?;
+            scope.push_n(1)?;
+            scope.pop_n(1)?;
+            let dst = scope.cursp();
+            scope.genop_1(session, opcode::OP_RANGE_EXC, dst - 1)?;
+            scope.pop_n(2)?;
+            let dst = scope.cursp();
+            let sym = scope.new_sym(session, b"[]")?;
+            scope.genop_3(session, opcode::OP_SEND, dst, sym, 1)?;
+        }
+        let cur = cg.current().1.cursp();
+        gen_pattern_bind(cg, inner, cur)
+    } else {
+        {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.gen_move(session, dst, arr_reg, false)?;
+            scope.push_n(1)?;
+            let dst = scope.cursp();
+            scope.gen_move(session, dst, idx_reg, false)?;
+            scope.gen_int(session, dst + 1, i64::from(elems_len))?;
+            scope.genop_1(session, opcode::OP_ADD, dst)?;
+            scope.push_n(1)?;
+            let dst = scope.cursp();
+            scope.gen_int(session, dst, -1)?;
+            scope.push_n(1)?;
+            scope.pop_n(1)?;
+            let dst = scope.cursp();
+            scope.genop_1(session, opcode::OP_RANGE_INC, dst - 1)?;
+            scope.pop_n(2)?;
+            let dst = scope.cursp();
+            let sym = scope.new_sym(session, b"[]")?;
+            scope.genop_3(session, opcode::OP_SEND, dst, sym, 1)?;
+        }
+        let cur = cg.current().1.cursp();
+        gen_pattern_bind(cg, inner, cur)
+    }
+}
+
+/// One-line `expr in pattern` (`PM_MATCH_PREDICATE_NODE`).
+fn gen_match_predicate<N: BackendNode>(
+    cg: &mut Codegen,
+    node: N,
+    val: bool,
+) -> Result<(), Diagnostic> {
+    let Some(view) = node.match_predicate_view() else {
+        return Err(unsupported(&node, "match predicate"));
+    };
+    let head = cg.current().1.cursp();
+    codegen(cg, view.value, true)?;
+    let mut fail_pos = JMPLINK_START;
+    codegen_pattern(cg, view.pattern, head, &mut fail_pos, -1, None)?;
+    {
+        let (session, scope) = cg.current();
+        scope.genop_1(session, opcode::OP_LOADTRUE, head)?;
+    }
+    let done = cg.current().1.genjmp(opcode::OP_JMP, JMPLINK_START)?;
+    if fail_pos != JMPLINK_START {
+        cg.current().1.dispatch_linked(fail_pos)?;
+    }
+    {
+        let (session, scope) = cg.current();
+        scope.genop_1(session, opcode::OP_LOADFALSE, head)?;
+    }
+    cg.current().1.dispatch(done)?;
+    if !val {
+        cg.current().1.pop_n(1)?;
+    }
+    Ok(())
+}
+
+/// One-line `expr => pattern` (`PM_MATCH_REQUIRED_NODE`).
+fn gen_match_required<N: BackendNode>(
+    cg: &mut Codegen,
+    node: N,
+    val: bool,
+) -> Result<(), Diagnostic> {
+    let Some(view) = node.match_required_view() else {
+        return Err(unsupported(&node, "match required"));
+    };
+    let head = cg.current().1.cursp();
+    codegen(cg, view.value, true)?;
+    let mut fail_pos = JMPLINK_START;
+    codegen_pattern(cg, view.pattern, head, &mut fail_pos, -1, None)?;
+    let ok = cg.current().1.genjmp(opcode::OP_JMP, JMPLINK_START)?;
+    if fail_pos != JMPLINK_START {
+        cg.current().1.dispatch_linked(fail_pos)?;
+    }
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_1(session, opcode::OP_LOADFALSE, dst)?;
+        let dst = scope.cursp();
+        scope.genop_1(session, opcode::OP_MATCHERR, dst)?;
+    }
+    cg.current().1.dispatch(ok)?;
+    cg.current().1.pop_n(1)?;
+    if val {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+        scope.push_n(1)?;
+    }
+    Ok(())
+}
+
+/// `case/in` (`PM_CASE_MATCH_NODE`).
+fn gen_case_match<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(view) = node.case_match_view() else {
+        return Err(unsupported(&node, "case match"));
+    };
+    let mut head: u16 = 0;
+    let mut case_end_jumps = JMPLINK_START;
+    let mut known_array_len: i32 = -1;
+    if let Some(predicate) = &view.predicate {
+        if predicate.kind_name() == "ArrayNode" {
+            if let Some(elements) = predicate.raw_array_elements() {
+                if !elements
+                    .iter()
+                    .any(|element| element.kind_name() == "SplatNode")
+                {
+                    known_array_len = elements.len() as i32;
+                }
+            }
+        }
+    }
+    let mut cache: Option<u16> = None;
+    if let Some(predicate) = view.predicate {
+        head = cg.current().1.cursp();
+        codegen(cg, predicate, true)?;
+        if known_array_len < 0 && view.conditions.len() > 1 {
+            for condition in &view.conditions {
+                let is_in = condition.kind_name() == "InNode";
+                let deconstructs = condition
+                    .in_view()
+                    .is_some_and(|in_view| pattern_deconstructs(&in_view.pattern));
+                if is_in && deconstructs {
+                    let slot = cg.current().1.cursp();
+                    {
+                        let (session, scope) = cg.current();
+                        scope.genop_1(session, opcode::OP_LOADNIL, slot)?;
+                        scope.push_n(1)?;
+                    }
+                    cache = Some(slot);
+                    break;
+                }
+            }
+        }
+    }
+    for condition in view.conditions {
+        let Some(in_view) = condition.in_view() else {
+            return Err(unsupported(&condition, "in clause"));
+        };
+        let mut fail_pos = JMPLINK_START;
+        codegen_pattern(
+            cg,
+            in_view.pattern,
+            head,
+            &mut fail_pos,
+            known_array_len,
+            cache,
+        )?;
+        gen_branch(cg, in_view.body, val)?;
+        if val {
+            cg.current().1.pop_n(1)?;
+        }
+        let pos = cg.current().1.genjmp(opcode::OP_JMP, case_end_jumps)?;
+        case_end_jumps = pos;
+        if fail_pos != JMPLINK_START {
+            cg.current().1.dispatch_linked(fail_pos)?;
+        }
+    }
+    if let Some(else_body) = view.else_body {
+        codegen(cg, else_body, val)?;
+        if val {
+            cg.current().1.pop_n(1)?;
+        }
+    } else {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_1(session, opcode::OP_LOADFALSE, dst)?;
+        let dst = scope.cursp();
+        scope.genop_1(session, opcode::OP_MATCHERR, dst)?;
+    }
+    if case_end_jumps != JMPLINK_START {
+        cg.current().1.dispatch_linked(case_end_jumps)?;
+    }
+    if val {
+        if head != 0 {
+            {
+                let (session, scope) = cg.current();
+                let dst = scope.cursp();
+                scope.gen_move(session, head, dst, false)?;
+            }
+            cg.current().1.pop_n(if cache.is_some() { 2 } else { 1 })?;
+        }
+        cg.current().1.push_n(1)?;
+    } else if head != 0 {
+        cg.current().1.pop_n(if cache.is_some() { 2 } else { 1 })?;
     }
     Ok(())
 }

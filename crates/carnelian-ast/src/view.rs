@@ -130,6 +130,111 @@ pub struct WhenView<N> {
     pub body: Option<Vec<N>>,
 }
 
+/// `case/in` parts (`CaseMatchNode`). `conditions` holds the `InNode`
+/// children in order; `else_body` is the `ElseNode` wrapper (`None` when
+/// absent), mirroring `CaseView`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseMatchView<N> {
+    /// Subject (`None` for a bare `case`).
+    pub predicate: Option<N>,
+    /// `in` clauses in order.
+    pub conditions: Vec<N>,
+    /// `else` clause node.
+    pub else_body: Option<N>,
+}
+
+/// `in` clause parts (`InNode`). `body` is `None` for a null statements
+/// subtree and `Some` (possibly empty) for a statements node, mirroring
+/// `WhenView`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InView<N> {
+    /// Pattern expression (possibly an `if`/`unless` guard wrapper).
+    pub pattern: N,
+    /// Body statements.
+    pub body: Option<Vec<N>>,
+}
+
+/// One-line match parts (`MatchPredicateNode` for `in`, `MatchRequiredNode`
+/// for `=>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchView<N> {
+    /// Matched value.
+    pub value: N,
+    /// Pattern expression.
+    pub pattern: N,
+}
+
+/// Alternation pattern parts (`AlternationPatternNode`, `left | right`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlternationView<N> {
+    /// Left alternative.
+    pub left: N,
+    /// Right alternative.
+    pub right: N,
+}
+
+/// Capture pattern parts (`CapturePatternNode`, `pattern => target`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureView<N> {
+    /// Inner pattern matched first.
+    pub value: N,
+    /// Capture target (`LocalVariableTargetNode`).
+    pub target: N,
+}
+
+/// Array pattern parts (`ArrayPatternNode`). `rest` is the `SplatNode`
+/// (`None` when absent).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArrayPatternView<N> {
+    /// Leading constant (`Const[...]` form, `None` otherwise).
+    pub constant: Option<N>,
+    /// Elements before the rest.
+    pub requireds: Vec<N>,
+    /// Rest element.
+    pub rest: Option<N>,
+    /// Elements after the rest.
+    pub posts: Vec<N>,
+}
+
+/// Hash pattern parts (`HashPatternNode`). `rest` is the `AssocSplatNode`
+/// or `NoKeywordsParameterNode` (`**nil`, `None` when absent).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HashPatternView<N> {
+    /// Leading constant (`Const[...]` form, `None` otherwise).
+    pub constant: Option<N>,
+    /// `AssocNode` elements in order.
+    pub elements: Vec<N>,
+    /// Rest element.
+    pub rest: Option<N>,
+}
+
+/// Find pattern parts (`FindPatternNode`, `*pre, mid, *post`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindPatternView<N> {
+    /// Leading constant (`Const(...)` form, `None` otherwise).
+    pub constant: Option<N>,
+    /// Leading rest (`SplatNode`).
+    pub left: N,
+    /// Middle elements searched for in the array.
+    pub requireds: Vec<N>,
+    /// Trailing rest (`SplatNode`).
+    pub right: N,
+}
+
+/// Guard wrapper parts (`pattern if cond`, `pattern unless cond`). The
+/// reference walks the `if`/`unless` node as the pattern itself, with the
+/// statements holding the inner pattern and the predicate holding the
+/// guard condition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuardView<N> {
+    /// Inner pattern (first statement of the wrapper).
+    pub inner: N,
+    /// Guard condition.
+    pub condition: N,
+    /// `unless` instead of `if`.
+    pub is_unless: bool,
+}
+
 /// Program parts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgramView<N> {
@@ -505,6 +610,66 @@ pub trait BackendNode: AstNode + Clone + Sized {
 
     /// `when` parts.
     fn when_view(&self) -> Option<WhenView<Self>> {
+        None
+    }
+
+    /// `case/in` parts.
+    fn case_match_view(&self) -> Option<CaseMatchView<Self>> {
+        None
+    }
+
+    /// `in` clause parts.
+    fn in_view(&self) -> Option<InView<Self>> {
+        None
+    }
+
+    /// `expr in pattern` parts.
+    fn match_predicate_view(&self) -> Option<MatchView<Self>> {
+        None
+    }
+
+    /// `expr => pattern` parts.
+    fn match_required_view(&self) -> Option<MatchView<Self>> {
+        None
+    }
+
+    /// Alternation pattern parts.
+    fn alternation_view(&self) -> Option<AlternationView<Self>> {
+        None
+    }
+
+    /// Capture pattern parts.
+    fn capture_view(&self) -> Option<CaptureView<Self>> {
+        None
+    }
+
+    /// Array pattern parts.
+    fn array_pattern_view(&self) -> Option<ArrayPatternView<Self>> {
+        None
+    }
+
+    /// Hash pattern parts.
+    fn hash_pattern_view(&self) -> Option<HashPatternView<Self>> {
+        None
+    }
+
+    /// Find pattern parts.
+    fn find_pattern_view(&self) -> Option<FindPatternView<Self>> {
+        None
+    }
+
+    /// Pinned variable (`PinnedVariableNode`): the `^name` operand.
+    fn pinned_var(&self) -> Option<Self> {
+        None
+    }
+
+    /// Pinned expression (`PinnedExpressionNode`): the `^(expr)` operand.
+    fn pinned_expr(&self) -> Option<Self> {
+        None
+    }
+
+    /// Guard wrapper parts (`pattern if cond` / `pattern unless cond`).
+    fn guard_view(&self) -> Option<GuardView<Self>> {
         None
     }
 

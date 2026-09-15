@@ -183,6 +183,7 @@ fn conv(node: &Mri, pool: &mut Pool) -> Node {
         Mri::ArrayPattern(inner) => lower_array_pattern(
             &inner.elements,
             None,
+            false,
             &inner.begin_l,
             &inner.end_l,
             node,
@@ -191,6 +192,9 @@ fn conv(node: &Mri, pool: &mut Pool) -> Node {
         Mri::ArrayPatternWithTail(inner) => lower_array_pattern(
             &inner.elements,
             None,
+            // A trailing comma is an implicit rest (`[a,]` matches longer
+            // arrays, like Prism's `ImplicitRestNode`).
+            true,
             &inner.begin_l,
             &inner.end_l,
             node,
@@ -3688,6 +3692,7 @@ fn lower_pin(inner: &Pin, node: &Mri, pool: &mut Pool) -> Node {
 fn lower_array_pattern(
     elements: &[Mri],
     constant: Option<Box<Node>>,
+    implicit_rest: bool,
     begin_l: &Option<Loc>,
     end_l: &Option<Loc>,
     node: &Mri,
@@ -3700,7 +3705,12 @@ fn lower_array_pattern(
     let (requireds, rest, posts) = match at {
         None => (
             elements.iter().map(|el| conv(el, pool)).collect(),
-            None,
+            implicit_rest.then(|| {
+                Box::new(Node::ImplicitRestNode {
+                    flags: 0,
+                    span: whole,
+                })
+            }),
             Vec::new(),
         ),
         Some(index) => {
@@ -3846,6 +3856,27 @@ fn lower_hash_pattern(
                     keyword_loc: span(&inner.name_l),
                 }));
             }
+            // Shorthand `{a:}` is a bare `MatchVar` (key implicit from the
+            // name); expand it to the `AssocNode` Prism parses.
+            Mri::MatchVar(inner) => lowered.push(Node::AssocNode {
+                flags: 0,
+                span: espan(element),
+                key: Box::new(Node::SymbolNode {
+                    flags: 0,
+                    span: span(&inner.name_l),
+                    opening_loc: None,
+                    value_loc: Some(span(&inner.name_l)),
+                    closing_loc: None,
+                    unescaped: inner.name.as_bytes().to_vec(),
+                }),
+                value: Box::new(Node::LocalVariableTargetNode {
+                    flags: 0,
+                    span: espan(element),
+                    name: sym(pool, &inner.name),
+                    depth: 0,
+                }),
+                operator_loc: None,
+            }),
             // Unreachable in valid trees: keep the lowered node inline.
             other => lowered.push(conv(other, pool)),
         }
@@ -3895,6 +3926,23 @@ fn lower_const_pattern(inner: &ConstPattern, node: &Mri, pool: &mut Pool) -> Nod
             constant,
             elements,
             rest,
+            opening_loc,
+            closing_loc,
+        },
+        Node::FindPatternNode {
+            left,
+            requireds,
+            right,
+            opening_loc,
+            closing_loc,
+            ..
+        } => Node::FindPatternNode {
+            flags: 0,
+            span: whole,
+            constant,
+            left,
+            requireds,
+            right,
             opening_loc,
             closing_loc,
         },

@@ -407,6 +407,12 @@ impl Scope {
         self.gen_b((a & 0xff) as u8)
     }
 
+    /// Overwrite a big-endian `u16` at `pos` (`emit_S`).
+    pub fn emit_s(&mut self, pos: u32, value: u16) -> Result<(), Diagnostic> {
+        self.emit_b(pos, (value >> 8) as u8)?;
+        self.emit_b(pos + 1, (value & 0xff) as u8)
+    }
+
     /// Fresh jump target marker (`new_label`).
     pub fn new_label(&mut self) -> u32 {
         self.lastlabel = self.pc;

@@ -4,11 +4,13 @@
 //! the wrapper stays `Clone`/`Copy` like any other cheap node handle.
 
 use crate::view::{
-    BackendNode, BeginView, BlockParamView, BlockView, CallTargetView, CallView, CaseView,
-    ClassView, ConstPathRead, ConstPathWrite, DefView, EnsureView, ForView, IfView,
-    IndexTargetView, IntegerLit, KeywordParamView, LambdaView, LvarRef, LvarWrite, ModuleView,
-    MultiTargetView, MultiWriteView, ParamsView, ProgramView, RescueModifierView, RescueView,
-    SclassView, SimpleLit, SuperView, VarWrite, WhenView, WhileView, YieldView,
+    AlternationView, ArrayPatternView, BackendNode, BeginView, BlockParamView, BlockView,
+    CallTargetView, CallView, CaptureView, CaseMatchView, CaseView, ClassView, ConstPathRead,
+    ConstPathWrite, DefView, EnsureView, FindPatternView, ForView, GuardView, HashPatternView,
+    IfView, InView, IndexTargetView, IntegerLit, KeywordParamView, LambdaView, LvarRef, LvarWrite,
+    MatchView, ModuleView, MultiTargetView, MultiWriteView, ParamsView, ProgramView,
+    RescueModifierView, RescueView, SclassView, SimpleLit, SuperView, VarWrite, WhenView,
+    WhileView, YieldView,
 };
 use crate::{
     arguments_node_flags, call_node_flags, loop_flags, AstNode, Integer, Node, Span, SymbolId,
@@ -100,6 +102,15 @@ impl<'a> Owned<'a> {
         ids.iter()
             .map(|id| self.pool.lookup(*id).map(|bytes| bytes.to_vec()))
             .collect()
+    }
+
+    /// First statement of a guard wrapper body (`None` for a null or
+    /// non-statements subtree).
+    fn guard_inner(&self, node: &'a Option<Box<Node>>) -> Option<Owned<'a>> {
+        match node.as_deref()? {
+            Node::StatementsNode { body, .. } => body.first().map(|inner| self.child(inner)),
+            _ => None,
+        }
     }
 }
 
@@ -391,6 +402,166 @@ impl BackendNode for Owned<'_> {
             } => Some(WhenView {
                 conditions: self.vec_children(conditions),
                 body: self.stmts(statements),
+            }),
+            _ => None,
+        }
+    }
+
+    fn case_match_view(&self) -> Option<CaseMatchView<Self>> {
+        match &self.node {
+            Node::CaseMatchNode {
+                predicate,
+                conditions,
+                else_clause,
+                ..
+            } => Some(CaseMatchView {
+                predicate: self.opt_child(predicate),
+                conditions: self.vec_children(conditions),
+                else_body: self.opt_child(else_clause),
+            }),
+            _ => None,
+        }
+    }
+
+    fn in_view(&self) -> Option<InView<Self>> {
+        match &self.node {
+            Node::InNode {
+                pattern,
+                statements,
+                ..
+            } => Some(InView {
+                pattern: self.child(pattern),
+                body: self.stmts(statements),
+            }),
+            _ => None,
+        }
+    }
+
+    fn match_predicate_view(&self) -> Option<MatchView<Self>> {
+        match &self.node {
+            Node::MatchPredicateNode { value, pattern, .. } => Some(MatchView {
+                value: self.child(value),
+                pattern: self.child(pattern),
+            }),
+            _ => None,
+        }
+    }
+
+    fn match_required_view(&self) -> Option<MatchView<Self>> {
+        match &self.node {
+            Node::MatchRequiredNode { value, pattern, .. } => Some(MatchView {
+                value: self.child(value),
+                pattern: self.child(pattern),
+            }),
+            _ => None,
+        }
+    }
+
+    fn alternation_view(&self) -> Option<AlternationView<Self>> {
+        match &self.node {
+            Node::AlternationPatternNode { left, right, .. } => Some(AlternationView {
+                left: self.child(left),
+                right: self.child(right),
+            }),
+            _ => None,
+        }
+    }
+
+    fn capture_view(&self) -> Option<CaptureView<Self>> {
+        match &self.node {
+            Node::CapturePatternNode { value, target, .. } => Some(CaptureView {
+                value: self.child(value),
+                target: self.child(target),
+            }),
+            _ => None,
+        }
+    }
+
+    fn array_pattern_view(&self) -> Option<ArrayPatternView<Self>> {
+        match &self.node {
+            Node::ArrayPatternNode {
+                constant,
+                requireds,
+                rest,
+                posts,
+                ..
+            } => Some(ArrayPatternView {
+                constant: self.opt_child(constant),
+                requireds: self.vec_children(requireds),
+                posts: self.vec_children(posts),
+                rest: self.opt_child(rest),
+            }),
+            _ => None,
+        }
+    }
+
+    fn hash_pattern_view(&self) -> Option<HashPatternView<Self>> {
+        match &self.node {
+            Node::HashPatternNode {
+                constant,
+                elements,
+                rest,
+                ..
+            } => Some(HashPatternView {
+                constant: self.opt_child(constant),
+                elements: self.vec_children(elements),
+                rest: self.opt_child(rest),
+            }),
+            _ => None,
+        }
+    }
+
+    fn find_pattern_view(&self) -> Option<FindPatternView<Self>> {
+        match &self.node {
+            Node::FindPatternNode {
+                constant,
+                left,
+                requireds,
+                right,
+                ..
+            } => Some(FindPatternView {
+                constant: self.opt_child(constant),
+                left: self.child(left),
+                requireds: self.vec_children(requireds),
+                right: self.child(right),
+            }),
+            _ => None,
+        }
+    }
+
+    fn pinned_var(&self) -> Option<Self> {
+        match &self.node {
+            Node::PinnedVariableNode { variable, .. } => Some(self.child(variable)),
+            _ => None,
+        }
+    }
+
+    fn pinned_expr(&self) -> Option<Self> {
+        match &self.node {
+            Node::PinnedExpressionNode { expression, .. } => Some(self.child(expression)),
+            _ => None,
+        }
+    }
+
+    fn guard_view(&self) -> Option<GuardView<Self>> {
+        match &self.node {
+            Node::IfNode {
+                predicate,
+                statements,
+                ..
+            } => Some(GuardView {
+                inner: self.guard_inner(statements)?,
+                condition: self.child(predicate),
+                is_unless: false,
+            }),
+            Node::UnlessNode {
+                predicate,
+                statements,
+                ..
+            } => Some(GuardView {
+                inner: self.guard_inner(statements)?,
+                condition: self.child(predicate),
+                is_unless: true,
             }),
             _ => None,
         }

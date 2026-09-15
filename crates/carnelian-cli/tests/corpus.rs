@@ -135,18 +135,11 @@ pub const P2_SNIPPETS: &[(&str, &str)] = &[
 ];
 
 /// `GATED` table from `p2_verify.rs`.
-pub const P2_GATED: &[(&str, &str, &str)] = &[
-    (
-        "case_match_gated",
-        "x = 1\ncase x\nin 1 then puts 1\nend\n",
-        "CaseMatchNode",
-    ),
-    (
-        "interp_symbol_gated",
-        "x = 1\nputs :\"s#{x}\"\n",
-        "InterpolatedSymbolNode",
-    ),
-];
+pub const P2_GATED: &[(&str, &str, &str)] = &[(
+    "interp_symbol_gated",
+    "x = 1\nputs :\"s#{x}\"\n",
+    "InterpolatedSymbolNode",
+)];
 
 /// `SNIPPETS` table from `p23_blocks.rs`.
 pub const P23_SNIPPETS: &[(&str, &str)] = &[
@@ -558,11 +551,6 @@ pub const P25_GATED: &[(&str, &str, &str)] = &[
         "class Foo25\nend\nFoo25::A, b = 1, 2\n",
         "ConstantPathTargetNode",
     ),
-    (
-        "case_match_gated",
-        "x = 1\ncase x\nin 1 then puts 1\nend\n",
-        "CaseMatchNode",
-    ),
     // Plain attribute writes gate on every frontend (no `gen_call_assign`
     // in the backend yet); the reference compiles them.
     (
@@ -609,6 +597,226 @@ pub const P26_SNIPPETS: &[(&str, &str)] = &[
         "undef_in_while",
         "x = 1\nwhile x == 2 do undef foo\nend\nputs 1\n",
     ),
+    ("case_in_int", "x = 1\ncase x\nin 1 then puts 1\nelse puts 2\nend\n"),
+    ("case_in_noelse", "x = 1\ncase x\nin 1 then puts 1\nend\n"),
+    (
+        "case_in_noelse_valued",
+        "x = 1\ny = case x\nin 1 then 10\nend\nputs y\n",
+    ),
+    ("case_in_str", "x = \"a\"\ncase x\nin \"a\" then puts 1\nelse puts 2\nend\n"),
+    ("case_in_sym", "x = :a\ncase x\nin :a then puts 1\nelse puts 2\nend\n"),
+    ("case_in_nil", "x = nil\ncase x\nin nil then puts 1\nelse puts 2\nend\n"),
+    (
+        "case_in_true",
+        "x = true\ncase x\nin true then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_float",
+        "x = 1.5\ncase x\nin 1.5 then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_istr",
+        "x = \"a1\"\ncase x\nin \"a#{1}\" then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_const",
+        "x = 1\ncase x\nin Integer then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_const_read",
+        "A = 1\nx = 1\ncase x\nin A then puts 1\nelse puts 2\nend\n",
+    ),
+    ("case_in_neg", "x = -1\ncase x\nin -1 then puts 1\nelse puts 2\nend\n"),
+    (
+        "case_in_bigint",
+        "x = 99999999999999999999999\ncase x\nin 99999999999999999999999 then puts 1\nelse puts 2\nend\n",
+    ),
+    ("case_in_uscore", "x = 1\ncase x\nin _ then puts 1\nelse puts 2\nend\n"),
+    ("case_in_alt", "x = 2\ncase x\nin 1 | 2 then puts 1\nelse puts 2\nend\n"),
+    (
+        "case_in_alt_chain",
+        "x = 3\ncase x\nin 1 | 2 | 3 then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_alt_nested",
+        "x = [1]\ncase x\nin [1 | 2] then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_pin",
+        "x = 5\ny = 5\ncase x\nin ^y then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_pin_expr",
+        "x = 6\ncase x\nin ^(1 + 5) then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_pin_ivar",
+        "@y = 5\nx = 5\ncase x\nin ^@y then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_pin_gvar",
+        "$y = 5\nx = 5\ncase x\nin ^$y then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_pin_cvar",
+        "@@y = 5\nx = 5\ncase x\nin ^@@y then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_pin_call",
+        "def v\n5\nend\nx = 5\ncase x\nin ^(v) then puts 1\nelse puts 2\nend\n",
+    ),
+    ("case_in_var", "x = 7\ncase x\nin a then puts a\nelse puts 2\nend\n"),
+    (
+        "case_in_capture",
+        "x = [1, 2]\ncase x\nin [1, 2] => a then puts a\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_array",
+        "x = [1, 2]\ncase x\nin [1, 2] then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_array_rest",
+        "x = [1, 2, 3]\ncase x\nin [1, *rest] then puts rest\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_array_mid",
+        "x = [1, 2, 3]\ncase x\nin [1, *mid, 3] then puts mid\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_array_posts",
+        "x = [1, 2, 3, 4]\ncase x\nin [1, *m, 3, 4] then puts m\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_array_bare_rest",
+        "x = [1, 2]\ncase x\nin [*] then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_array_trailing",
+        "x = [1]\ncase x\nin [a,] then puts a\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_array_const",
+        "x = [1, 2]\ncase x\nin Array[1, 2] then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_array_const_rest",
+        "x = [1, 2, 3]\ncase x\nin Array[1, *r] then puts r\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_array_lit",
+        "case [1, 2]\nin [a, b] then puts a\nelse puts 2\nend\n",
+    ),
+    ("case_in_array_many", "x = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]\ncase x\nin [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1] then puts 1\nelse puts 2\nend\n"),
+    (
+        "case_in_hash",
+        "x = {a: 1}\ncase x\nin {a: 1} then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_hash_shorthand",
+        "x = {a: 1, b: 2}\ncase x\nin {a:} then puts a\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_hash_rest",
+        "x = {a: 1, b: 2}\ncase x\nin {a: 1, **rest} then puts rest\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_hash_no_rest",
+        "x = {a: 1}\ncase x\nin {a: 1, **nil} then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_hash_anon_rest",
+        "x = {a: 1, b: 2}\ncase x\nin {a: 1, **} then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_hash_empty",
+        "x = {}\ncase x\nin {} then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_hash_const",
+        "x = {a: 1}\ncase x\nin Hash[a: 1] then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_nested",
+        "x = {a: [1, {b: 2}]}\ncase x\nin {a: [1, {b:}]} then puts b\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_nested_array",
+        "x = [{a: 1}]\ncase x\nin [{a:}] then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_find",
+        "x = [1, 2, 3]\ncase x\nin [*, 2, *] then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_find_named",
+        "x = [0, 1, 2, 9]\ncase x\nin [*pre, 1, 2, *post] then puts pre\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_find_rest",
+        "x = [1]\ncase x\nin *, 1, *r then puts r\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_find_const",
+        "x = [1, 2]\ncase x\nin Array(*, 1, *) then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_guard_if",
+        "x = 3\ncase x\nin n if n > 2 then puts n\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_guard_unless",
+        "x = 1\ncase x\nin n unless n > 2 then puts n\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_guard_array",
+        "x = [3, 4]\ncase x\nin [a, b] if a < b then puts a\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_guard_complex",
+        "x = [1, 2]\ncase x\nin [a, b] if a == 1 && b == 2 then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_valued",
+        "x = [1, 2]\ny = case x\nin [a, b] then a\nelse 0\nend\nputs y\n",
+    ),
+    (
+        "case_in_valued_single",
+        "x = [1]\ny = case x\nin [a] then a\nelse 0\nend\nputs y\n",
+    ),
+    (
+        "case_in_noval_binds",
+        "x = [1, 2]\ncase x\nin [a, b] then puts a\nelse puts 0\nend\n",
+    ),
+    (
+        "case_in_multi_array",
+        "x = [1, 2]\ncase x\nin [0] then puts 0\nin [1, 2] then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_multi_hash",
+        "x = {a: 1}\ncase x\nin {b: 1} then puts 0\nin {a: 1} then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_deep",
+        "x = [[[[1]]]]\ncase x\nin [[[[a]]]] then puts a\nelse puts 2\nend\n",
+    ),
+    (
+        "match_predicate",
+        "x = 1\nif x in 1 then puts 1\nend\nputs 2\n",
+    ),
+    (
+        "match_predicate_noval",
+        "x = [1]\nif x in [Integer] then puts 1\nend\nputs 2\n",
+    ),
+    (
+        "match_predicate_valued",
+        "x = 1\ny = x in 1\nputs y\n",
+    ),
+    ("match_required", "x = 1\nx => 1\nputs 1\n"),
+    ("match_required_noval", "x = 1\nx => 1\nputs 2\n"),
+    ("match_required_bind", "x = [1, 2]\nx => [a, b]\nputs a\n"),
+    ("match_required_multi", "x = [1, 2]\nx => a, b\nputs a\n"),
+    ("match_required_capture", "x = 5\nx => Integer => n\nputs n\n"),
+    ("match_required_shorthand", "x = {a: 1}\nx => {a:}\nputs a\n"),
     ("defined_lvar", "x = 1\nputs defined?(x)\n"),
     ("defined_method", "puts defined?(foo)\n"),
     ("defined_method_args", "puts defined?(foo(bar))\n"),
@@ -688,19 +896,49 @@ pub const P26_GATED: &[(&str, &str, &str)] = &[
         "block argument",
     ),
     (
-        "case_match_gated",
-        "x = 1\ncase x\nin 1 then puts 1\nelse puts 2\nend\n",
-        "CaseMatchNode",
+        "case_in_range_gated",
+        "x = 2\ncase x\nin 1..3 then puts 1\nelse puts 2\nend\n",
+        "RangeNode",
     ),
     (
-        "match_predicate_gated",
-        "x = 1\nif x in 1 then puts 1\nend\nputs 2\n",
-        "MatchPredicateNode",
+        "case_in_regexp_gated",
+        "x = \"ab\"\ncase x\nin /a/ then puts 1\nelse puts 2\nend\n",
+        "RegularExpressionNode",
     ),
     (
-        "match_required_gated",
-        "x = 1\nx => 1\nputs 1\n",
-        "MatchRequiredNode",
+        "case_in_xstr_gated",
+        "x = 1\ncase x\nin `foo` then puts 1\nelse puts 2\nend\n",
+        "XStringNode",
+    ),
+    (
+        "case_in_rational_gated",
+        "x = 1\ncase x\nin 1r then puts 1\nelse puts 2\nend\n",
+        "RationalNode",
+    ),
+    (
+        "case_in_imag_gated",
+        "x = 1\ncase x\nin 1i then puts 1\nelse puts 2\nend\n",
+        "ImaginaryNode",
+    ),
+    (
+        "case_in_isym_gated",
+        "x = :a\ncase x\nin :\"a#{1 - 1}\" then puts 1\nelse puts 2\nend\n",
+        "InterpolatedSymbolNode",
+    ),
+    (
+        "case_in_iregexp_gated",
+        "x = \"a1\"\ncase x\nin /a#{1}/ then puts 1\nelse puts 2\nend\n",
+        "InterpolatedRegularExpressionNode",
+    ),
+    (
+        "case_in_alt_capture_gated",
+        "x = 1\ncase x\nin (Integer => n) | (String => n) then puts n\nelse puts 2\nend\n",
+        "variable capture in alternative pattern",
+    ),
+    (
+        "match_write_gated",
+        "x = \"ab\"\nif /(?<c>a)/ =~ x then puts c\nend\nputs 2\n",
+        "MatchWriteNode",
     ),
     (
         "preexec_gated",

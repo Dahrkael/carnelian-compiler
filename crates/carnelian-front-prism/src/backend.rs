@@ -1,11 +1,13 @@
 //! `BackendNode` for borrowed nodes (thin access, no tree copies).
 
 use carnelian_ast::view::{
-    BackendNode, BeginView, BlockParamView, BlockView, CallTargetView, CallView, CaseView,
-    ClassView, ConstPathRead, ConstPathWrite, DefView, EnsureView, ForView, IfView,
-    IndexTargetView, IntegerLit, KeywordParamView, LambdaView, LvarRef, LvarWrite, ModuleView,
-    MultiTargetView, MultiWriteView, ParamsView, ProgramView, RescueModifierView, RescueView,
-    SclassView, SimpleLit, SuperView, VarWrite, WhenView, WhileView, YieldView,
+    AlternationView, ArrayPatternView, BackendNode, BeginView, BlockParamView, BlockView,
+    CallTargetView, CallView, CaptureView, CaseMatchView, CaseView, ClassView, ConstPathRead,
+    ConstPathWrite, DefView, EnsureView, FindPatternView, ForView, GuardView, HashPatternView,
+    IfView, InView, IndexTargetView, IntegerLit, KeywordParamView, LambdaView, LvarRef, LvarWrite,
+    MatchView, ModuleView, MultiTargetView, MultiWriteView, ParamsView, ProgramView,
+    RescueModifierView, RescueView, SclassView, SimpleLit, SuperView, VarWrite, WhenView,
+    WhileView, YieldView,
 };
 use carnelian_ast::AstNode;
 
@@ -309,6 +311,116 @@ impl BackendNode for PrismNode<'_> {
             body: node
                 .statements()
                 .map(|statements| wrap_many(statements.body())),
+        })
+    }
+
+    fn case_match_view(&self) -> Option<CaseMatchView<Self>> {
+        let node = self.inner.as_case_match_node()?;
+        Some(CaseMatchView {
+            predicate: node.predicate().map(wrap),
+            conditions: wrap_many(node.conditions()),
+            else_body: node.else_clause().map(|clause| wrap(clause.as_node())),
+        })
+    }
+
+    fn in_view(&self) -> Option<InView<Self>> {
+        let node = self.inner.as_in_node()?;
+        Some(InView {
+            pattern: wrap(node.pattern()),
+            body: node
+                .statements()
+                .map(|statements| wrap_many(statements.body())),
+        })
+    }
+
+    fn match_predicate_view(&self) -> Option<MatchView<Self>> {
+        let node = self.inner.as_match_predicate_node()?;
+        Some(MatchView {
+            value: wrap(node.value()),
+            pattern: wrap(node.pattern()),
+        })
+    }
+
+    fn match_required_view(&self) -> Option<MatchView<Self>> {
+        let node = self.inner.as_match_required_node()?;
+        Some(MatchView {
+            value: wrap(node.value()),
+            pattern: wrap(node.pattern()),
+        })
+    }
+
+    fn alternation_view(&self) -> Option<AlternationView<Self>> {
+        let node = self.inner.as_alternation_pattern_node()?;
+        Some(AlternationView {
+            left: wrap(node.left()),
+            right: wrap(node.right()),
+        })
+    }
+
+    fn capture_view(&self) -> Option<CaptureView<Self>> {
+        let node = self.inner.as_capture_pattern_node()?;
+        Some(CaptureView {
+            value: wrap(node.value()),
+            target: wrap(node.target().as_node()),
+        })
+    }
+
+    fn array_pattern_view(&self) -> Option<ArrayPatternView<Self>> {
+        let node = self.inner.as_array_pattern_node()?;
+        Some(ArrayPatternView {
+            constant: node.constant().map(wrap),
+            requireds: wrap_many(node.requireds()),
+            rest: node.rest().map(wrap),
+            posts: wrap_many(node.posts()),
+        })
+    }
+
+    fn hash_pattern_view(&self) -> Option<HashPatternView<Self>> {
+        let node = self.inner.as_hash_pattern_node()?;
+        Some(HashPatternView {
+            constant: node.constant().map(wrap),
+            elements: wrap_many(node.elements()),
+            rest: node.rest().map(wrap),
+        })
+    }
+
+    fn find_pattern_view(&self) -> Option<FindPatternView<Self>> {
+        let node = self.inner.as_find_pattern_node()?;
+        Some(FindPatternView {
+            constant: node.constant().map(wrap),
+            left: wrap(node.left().as_node()),
+            requireds: wrap_many(node.requireds()),
+            right: wrap(node.right()),
+        })
+    }
+
+    fn pinned_var(&self) -> Option<Self> {
+        let node = self.inner.as_pinned_variable_node()?;
+        Some(wrap(node.variable()))
+    }
+
+    fn pinned_expr(&self) -> Option<Self> {
+        let node = self.inner.as_pinned_expression_node()?;
+        Some(wrap(node.expression()))
+    }
+
+    fn guard_view(&self) -> Option<GuardView<Self>> {
+        if let Some(node) = self.inner.as_if_node() {
+            let statements = node.statements()?;
+            let inner = wrap_many(statements.body()).into_iter().next()?;
+            return Some(GuardView {
+                inner,
+                condition: wrap(node.predicate()),
+                is_unless: false,
+            });
+        }
+        let node = self.inner.as_unless_node()?;
+        let statements = node.statements()?;
+        let inner = wrap_many(statements.body()).into_iter().next()?;
+        Some(GuardView {
+            inner,
+            condition: wrap(node.predicate()),
+            is_unless: true,
         })
     }
 

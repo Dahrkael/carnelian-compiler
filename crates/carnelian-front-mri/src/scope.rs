@@ -704,8 +704,10 @@ impl Resolver<'_> {
             Node::LocalVariableWriteNode {
                 name, depth, value, ..
             } => {
-                self.walk_boxed(value);
+                // Source order: the target precedes its value, so a value
+                // that binds pattern locals keeps Prism's slot order.
                 *depth = self.bind_write(*name);
+                self.walk_boxed(value);
             }
             Node::MatchPredicateNode { value, pattern, .. }
             | Node::MatchRequiredNode { value, pattern, .. } => {

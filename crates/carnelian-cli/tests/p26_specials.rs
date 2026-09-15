@@ -1,8 +1,9 @@
-//! P2.6 certification (alias/undef and `defined?` tranche): `verify`
-//! compares `compile --frontend prism` against the pinned C golden, byte for
-//! byte, in both strip modes. Exit `0` required. Pattern matching (`case/in`,
-//! `in`/`=>`), `BEGIN`/`END` and flip-flop belong to later work and are
-//! locked as diagnostics below, never as diverging bytes. `defined?`
+//! P2.6 certification (alias/undef, `defined?` and `case/in` pattern
+//! matching): `verify` compares `compile --frontend prism` against the
+//! pinned C golden, byte for byte, in both strip modes. Exit `0` required.
+//! `BEGIN`/`END` and flip-flop belong to later work and are locked as
+//! diagnostics below, never as diverging bytes, as are value patterns over
+//! still-gated literal nodes (ranges,regexps) and `=~`. `defined?`
 //! back-reference reads and chain links that hit still-gated call forms stay
 //! gated for the same reason.
 
