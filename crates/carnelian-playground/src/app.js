@@ -163,7 +163,10 @@ fillExamples();
 try {
   await init();
   wasmReady = true;
+  $('spinner').classList.add('done');
+  $('btn-compile').disabled = false;
   $('wasm-state').textContent = 'wasm ready';
 } catch (e) {
+  $('spinner').classList.add('done');
   $('wasm-state').textContent = 'wasm failed: serve dist/ via http (' + e + ')';
 }

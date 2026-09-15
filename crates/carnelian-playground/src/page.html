@@ -22,19 +22,23 @@
 			.about { font-size: 0.85em; color: #333; }
 			.row { display: flex; gap: 0.5em; align-items: center; flex-wrap: wrap; margin: 0.4em 0; }
 			button:disabled { opacity: 0.45; }
+			.spinner { display: inline-block; width: 0.9em; height: 0.9em; border: 0.15em solid #ccc; border-top-color: #333; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; }
+			.spinner.done { display: none; }
+			@keyframes spin { to { transform: rotate(360deg); } }
 		</style>
 	</head>
 	<body>
 		<h1>Carnelian Playground <small></small></h1>
 		<div class="about">
-			<p><b>Carnelian</b> is an mruby compiler backend written in pure Rust with support for <a href="https://github.com/ruby/prism" target="_blank">Prism</a>, <a href="https://github.com/lib-ruby-parser/lib-ruby-parser" target="_blank">lib-ruby-parser</ and soon its own Prism Rust port.</p>
+			<p><b>Carnelian</b> is an mruby compiler backend written in pure Rust with support for <a href="https://github.com/ruby/prism" target="_blank">Prism</a>, <a href="https://github.com/lib-ruby-parser/lib-ruby-parser" target="_blank">lib-ruby-parser</a> and soon its own Prism Rust port.</p>
 			<p>This playground uses the <b>lib-ruby-parser</b> frontend and the <a href="https://github.com/mrubyedge/mrubyedge" target="_blank">mrubyedge</a> interpreter for a 100% Rust WASM executable with no clang nor Emscripten dependencies that compiles and runs ruby code locally in your browser (MRI grammar 3.1.2)</p>
 		</div>
 		<div class="row">
 			<label for="example">Example:</label>
 			<select id="example"></select>
-			<button id="btn-compile">Compile</button>
+			<button id="btn-compile" disabled>Compile</button>
 			<button id="btn-run" disabled>Run</button>
+			<span id="spinner" class="spinner" aria-label="loading"></span>
 			<span id="wasm-state">loading wasm…</span>
 		</div>
 		<div class="cols">
