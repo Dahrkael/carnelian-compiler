@@ -8,8 +8,8 @@
 
 use carnelian_ast::{
     arguments_node_flags, array_node_flags, call_node_flags, integer_base_flags,
-    keyword_hash_node_flags, loop_flags, regular_expression_flags, Integer, Node, Span, SymbolId,
-    SymbolPool,
+    keyword_hash_node_flags, limbs_to_decimal, loop_flags, regular_expression_flags, Integer, Node,
+    Span, SymbolId, SymbolPool,
 };
 use lib_ruby_parser::nodes::*;
 use lib_ruby_parser::Loc;
@@ -3270,32 +3270,6 @@ fn digit_value(byte: u8) -> u32 {
         b'A'..=b'F' => u32::from(byte - b'A') + 10,
         _ => u32::MAX,
     }
-}
-
-/// Decimal digits of little-endian base-2^32 limbs, without leading zeros.
-fn limbs_to_decimal(limbs: &[u32]) -> Vec<u8> {
-    let mut words: Vec<u32> = limbs.to_vec();
-    while words.last() == Some(&0) {
-        words.pop();
-    }
-    if words.is_empty() {
-        return vec![b'0'];
-    }
-    let mut digits = Vec::new();
-    while !words.is_empty() {
-        let mut remainder: u64 = 0;
-        for index in (0..words.len()).rev() {
-            let current = (remainder << 32) | u64::from(words[index]);
-            words[index] = (current / 10) as u32;
-            remainder = current % 10;
-        }
-        digits.push(b'0' + remainder as u8);
-        while words.last() == Some(&0) {
-            words.pop();
-        }
-    }
-    digits.reverse();
-    digits
 }
 
 /// Float literal text to `f64` (underscores stripped; `0.0` fallback).

@@ -60,6 +60,41 @@ impl Integer {
     }
 }
 
+/// `PM_PARAMETER_FLAGS_NIL_BLOCK` of the patched reference Prism (`&nil`,
+/// "method accepts no block"); upstream `ruby-prism` has no such constant,
+/// so both frontends test this bit.
+pub const NIL_BLOCK: u32 = 8;
+
+/// Decimal digits of a little-endian base-2^32 limb slice, without leading
+/// zeros (empty input reads as zero). Shared by the Prism and MRI
+/// frontends; the owned accessor's `bigint_from_raw` reaches the same
+/// canonical digits from decimal text instead of binary limbs.
+#[must_use]
+pub fn limbs_to_decimal(limbs: &[u32]) -> Vec<u8> {
+    let mut words: Vec<u32> = limbs.to_vec();
+    while words.last() == Some(&0) {
+        words.pop();
+    }
+    if words.is_empty() {
+        return vec![b'0'];
+    }
+    let mut digits = Vec::new();
+    while !words.is_empty() {
+        let mut remainder: u64 = 0;
+        for index in (0..words.len()).rev() {
+            let current = (remainder << 32) | u64::from(words[index]);
+            words[index] = (current / 10) as u32;
+            remainder = current % 10;
+        }
+        digits.push(b'0' + remainder as u8);
+        while words.last() == Some(&0) {
+            words.pop();
+        }
+    }
+    digits.reverse();
+    digits
+}
+
 /// Deterministic symbol pool: insertion order defines IDs.
 #[derive(Debug, Default)]
 pub struct SymbolPool {

@@ -5,7 +5,7 @@
 //! intern into the returned `SymbolPool`, `location` fields become offsets,
 //! `integer` fields become the `Integer` model and flags stay raw `u16`.
 
-use carnelian_ast::{Integer, Node, Span, SymbolPool};
+use carnelian_ast::{limbs_to_decimal, Integer, Node, Span, SymbolPool};
 
 use crate::PrismNode;
 
@@ -1989,30 +1989,4 @@ fn convert_integer(value: &ruby_prism::Integer<'_>) -> Integer {
         raw.insert(0, b'-');
     }
     Integer::Fallback { raw }
-}
-
-/// Decimal digits of little-endian base-2^32 limbs, without leading zeros.
-fn limbs_to_decimal(limbs: &[u32]) -> Vec<u8> {
-    let mut words: Vec<u32> = limbs.to_vec();
-    while words.last() == Some(&0) {
-        words.pop();
-    }
-    if words.is_empty() {
-        return vec![b'0'];
-    }
-    let mut digits = Vec::new();
-    while !words.is_empty() {
-        let mut remainder: u64 = 0;
-        for index in (0..words.len()).rev() {
-            let current = (remainder << 32) | u64::from(words[index]);
-            words[index] = (current / 10) as u32;
-            remainder = current % 10;
-        }
-        digits.push(b'0' + remainder as u8);
-        while words.last() == Some(&0) {
-            words.pop();
-        }
-    }
-    digits.reverse();
-    digits
 }

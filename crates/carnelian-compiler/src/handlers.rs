@@ -1762,6 +1762,21 @@ fn enter_block_scope<N: BackendNode>(
     scope.push_n(1)
 }
 
+/// Split trailing keyword hashes off gathered call items (`gen_call` and
+/// `gen_yield` share the `KeywordHashNode` tail; `gen_values` stops at it).
+fn split_keywords<N: BackendNode>(mut items: Vec<N>) -> (Vec<N>, Vec<N>) {
+    match items
+        .iter()
+        .position(|item| item.kind_name() == "KeywordHashNode")
+    {
+        Some(first) => {
+            let keywords = items.split_off(first);
+            (items, keywords)
+        }
+        None => (items, Vec::new()),
+    }
+}
+
 /// `yield` (`PM_YIELD_NODE`): `BLKPUSH` plus a direct `BLKCALL` for plain
 /// positional arguments, falling back to `:call` dispatch when keyword
 /// arguments or an array-gathered list are present.
@@ -1783,18 +1798,10 @@ fn gen_yield<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(),
     let mut nk: i32 = 0;
     let mut st: i32 = 0;
     if let Some(args) = view.args {
-        let Some(mut items) = args.call_args() else {
+        let Some(items) = args.call_args() else {
             return Err(unsupported(&node, "complex arguments"));
         };
-        // Keyword arguments follow the positional ones in a single
-        // `KeywordHashNode`; `gen_values` stops at it.
-        let keywords = match items
-            .iter()
-            .position(|item| item.kind_name() == "KeywordHashNode")
-        {
-            Some(first) => items.split_off(first),
-            None => Vec::new(),
-        };
+        let (items, keywords) = split_keywords(items);
         if !items.is_empty() {
             n = gen_values(cg, items, true, CALL_ARG_LIMIT)?;
             if n < 0 {
@@ -2655,14 +2662,6 @@ fn gen_defined_recv<N: BackendNode>(
             cg.current().1.rlev = rlev;
             return Err(defined_gate(&value, "receiver"));
         }
-        if value.kind_name() == "CallNode" {
-            if let Some(call) = value.call() {
-                if call.block.is_some() {
-                    cg.current().1.rlev = rlev;
-                    return Err(unsupported(&value, "block argument"));
-                }
-            }
-        }
         codegen(cg, value, true)?;
         cg.current().1.rlev = rlev;
         return Ok(());
@@ -3106,28 +3105,10 @@ fn gen_call_impl<N: BackendNode>(
         // `...` rides `gen_values` like a splat, then forces the block
         // call shape with a full `0xFF` operand (`gen_call` tail).
         forwarding = args.args_forwarding();
-        let Some(mut items) = args.call_args() else {
+        let Some(items) = args.call_args() else {
             return Err(unsupported(&node, "complex arguments"));
         };
-        if recv_ready
-            && items.iter().any(|item| {
-                matches!(
-                    item.kind_name(),
-                    "SplatNode" | "KeywordHashNode" | "ForwardingArgumentsNode"
-                )
-            })
-        {
-            return Err(unsupported(&node, "complex arguments"));
-        }
-        // Keyword arguments follow the positional ones in a single
-        // `KeywordHashNode`; `gen_values` stops at it.
-        let keywords = match items
-            .iter()
-            .position(|item| item.kind_name() == "KeywordHashNode")
-        {
-            Some(first) => items.split_off(first),
-            None => Vec::new(),
-        };
+        let (items, keywords) = split_keywords(items);
         if !items.is_empty() {
             nargs = gen_values(cg, items, true, CALL_ARG_LIMIT)?;
             if nargs < 0 {
@@ -3149,9 +3130,6 @@ fn gen_call_impl<N: BackendNode>(
     }
     let mut blk = false;
     if let Some(block) = view.block {
-        if recv_ready {
-            return Err(unsupported(&node, "block argument"));
-        }
         // Literal blocks and `&` block args share the `SENDB` path
         // (`gen_call` codes the block `VAL`, then pops it).
         codegen(cg, block, true)?;

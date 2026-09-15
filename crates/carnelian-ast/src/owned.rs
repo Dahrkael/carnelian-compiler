@@ -14,7 +14,7 @@ use crate::view::{
 };
 use crate::{
     arguments_node_flags, call_node_flags, loop_flags, AstNode, Integer, Node, Span, SymbolId,
-    SymbolPool,
+    SymbolPool, NIL_BLOCK,
 };
 
 /// Borrowed owned tree plus its symbol pool.
@@ -26,10 +26,9 @@ pub struct Owned<'a> {
     pub pool: &'a SymbolPool,
 }
 
-/// Patched reference Prism `&nil` bit (no upstream constant, mirrors FFI).
-const NIL_BLOCK_BIT: u16 = 8;
-
-/// Decimal digits of an overflow literal, matching FFI `limbs_to_decimal`.
+/// Decimal digits of an overflow literal: same canonical digits as the
+/// shared `crate::limbs_to_decimal`, reached from decimal fallback text
+/// instead of binary limbs.
 fn bigint_from_raw(raw: &[u8]) -> Option<IntegerLit> {
     let mut bytes: Vec<u8> = raw.iter().copied().filter(|b| *b != b'_').collect();
     // Small values stay `I64` even when lowered as fallback text.
@@ -767,7 +766,7 @@ impl BackendNode for Owned<'_> {
     fn block_param_noblock(&self) -> bool {
         match &self.node {
             Node::BlockParameterNode { name, flags, .. } => {
-                (*flags & NIL_BLOCK_BIT) != 0
+                (u32::from(*flags) & NIL_BLOCK) != 0
                     || name.and_then(|id| self.pool.lookup(id)) == Some(b"nil".as_slice())
             }
             _ => false,

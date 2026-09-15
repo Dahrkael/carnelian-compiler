@@ -872,6 +872,32 @@ pub const P26_SNIPPETS: &[(&str, &str)] = &[
     ("defined_backref_index", "puts defined?($&[0])\n"),
     ("defined_backref_chain", "puts defined?($&.foo.bar)\n"),
     ("defined_backref_splat", "puts defined?($&.foo(*a))\n"),
+    ("defined_chain_splat", "puts defined?(x.foo(*a).bar)\n"),
+    ("defined_chain_kwargs", "puts defined?(o.b(k: 1).c)\n"),
+    ("defined_chain_dsplat", "puts defined?(o.b(**h).c)\n"),
+    ("defined_chain_blockarg", "puts defined?(o.b(&blk).c)\n"),
+    ("defined_chain_splat_kwargs", "puts defined?(o.b(*a, k: 1).c)\n"),
+    ("defined_chain_safe_splat", "puts defined?(o&.b(*a).c)\n"),
+    ("defined_chain_block", "puts defined?(x.foo { }.bar)\n"),
+    ("defined_chain_block_params", "puts defined?(o.b { |x| x }.c)\n"),
+    ("defined_bare_block_receiver", "puts defined?(foo { }.bar)\n"),
+    ("defined_chain_splat_blockarg", "puts defined?(foo(*a, &blk).bar)\n"),
+    (
+        "defined_chain_forward",
+        "def foo(...)\nputs defined?(o.b(...).c)\nend\nfoo(1, 2)\n",
+    ),
+    (
+        "defined_chain_forward_args",
+        "def foo(...)\nputs defined?(o.b(1, ...).c)\nend\nfoo(1)\n",
+    ),
+    (
+        "defined_yield_splat_receiver",
+        "def m\nputs defined?(yield(*a).foo)\nend\n",
+    ),
+    (
+        "defined_index_blockarg_chain",
+        "a = [0]\nputs defined?(a[0, &b].c)\n",
+    ),
     ("defined_match_rest", "puts defined?($~)\nputs defined?($+)\nputs defined?($`)\n"),
     ("backref_match", "puts $&\n"),
     ("backref_prematch", "puts $`\n"),
@@ -885,16 +911,6 @@ pub const P26_SNIPPETS: &[(&str, &str)] = &[
 
 /// `GATED` table from `p26_specials.rs`.
 pub const P26_GATED: &[(&str, &str, &str)] = &[
-    (
-        "defined_chain_splat_gated",
-        "puts defined?(x.foo(*a).bar)\n",
-        "complex arguments",
-    ),
-    (
-        "defined_chain_block_gated",
-        "puts defined?(x.foo { }.bar)\n",
-        "block argument",
-    ),
     (
         "case_in_range_gated",
         "x = 2\ncase x\nin 1..3 then puts 1\nelse puts 2\nend\n",

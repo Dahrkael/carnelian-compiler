@@ -10,6 +10,7 @@ use carnelian_ast::view::{
     WhileView, YieldView,
 };
 use carnelian_ast::AstNode;
+use carnelian_ast::{limbs_to_decimal, NIL_BLOCK};
 
 use crate::PrismNode;
 
@@ -31,37 +32,6 @@ fn else_statements<'pr>(clause: &ruby_prism::ElseNode<'pr>) -> Vec<PrismNode<'pr
 
 fn const_bytes(id: ruby_prism::ConstantId<'_>) -> Vec<u8> {
     id.as_slice().to_vec()
-}
-
-/// `PM_PARAMETER_FLAGS_NIL_BLOCK` of the patched reference Prism
-/// (`&nil`, "method accepts no block").
-const NIL_BLOCK_FLAG: u32 = 8;
-
-/// Decimal digits of a little-endian base-2^32 limb slice, without leading
-/// zeros (empty input reads as zero).
-fn limbs_to_decimal(limbs: &[u32]) -> Vec<u8> {
-    let mut words: Vec<u32> = limbs.to_vec();
-    while words.last() == Some(&0) {
-        words.pop();
-    }
-    if words.is_empty() {
-        return vec![b'0'];
-    }
-    let mut digits = Vec::new();
-    while !words.is_empty() {
-        let mut remainder: u64 = 0;
-        for index in (0..words.len()).rev() {
-            let current = (remainder << 32) | u64::from(words[index]);
-            words[index] = (current / 10) as u32;
-            remainder = current % 10;
-        }
-        digits.push(b'0' + remainder as u8);
-        while words.last() == Some(&0) {
-            words.pop();
-        }
-    }
-    digits.reverse();
-    digits
 }
 
 impl BackendNode for PrismNode<'_> {
@@ -577,7 +547,7 @@ impl BackendNode for PrismNode<'_> {
         // Patched reference Prism sets `PM_PARAMETER_FLAGS_NIL_BLOCK`;
         // upstream `ruby-prism` has no such flag constant, so test the bit.
         self.inner.as_block_parameter_node().is_some_and(|node| {
-            (u32::from(node.flags()) & NIL_BLOCK_FLAG) != 0
+            (u32::from(node.flags()) & NIL_BLOCK) != 0
                 || node.name().is_some_and(|id| id.as_slice() == b"nil")
         })
     }
