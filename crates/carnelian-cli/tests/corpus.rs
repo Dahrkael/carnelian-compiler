@@ -132,6 +132,16 @@ pub const P2_SNIPPETS: &[(&str, &str)] = &[
     ("interp_noval_empty", "\"#{}\"\nputs 1\n"),
     ("interp_multi", "x = 1\ny = \"a\"\nputs \"a#{x}b#{y}c\"\n"),
     ("interp_side_effect", "\"hi #{puts 1}\"\nputs 2\n"),
+    ("range_incl", "a = 1..3\nputs a\n"),
+    ("range_excl", "a = 1...3\nputs a\n"),
+    ("range_index", "hex = [1, 2, 3]\nputs hex[0..1]\n"),
+    ("range_beginless", "a = ..3\nputs a\n"),
+    ("range_endless", "a = (1..)\nputs a\n"),
+    ("range_vars", "x = 1\ny = 3\na = x..y\nputs a\n"),
+    ("range_str", "a = \"a\"..\"z\"\nputs a\n"),
+    ("paren_arith", "puts (1 + 2) * 3\n"),
+    ("paren_and", "x = 1 and (y = 2)\nputs y\n"),
+    ("paren_empty", "()\nputs 1\n"),
 ];
 
 /// `GATED` table from `p2_verify.rs`.
@@ -194,6 +204,11 @@ pub const P23_SNIPPETS: &[(&str, &str)] = &[
         "lambda_mixed",
         "f = ->(a, *b, c, d: 1, &e) { puts a }\nf.call(1, 2, 3)\n",
     ),
+    ("return_block", "[1].each { return 1 }\nputs 2\n"),
+    ("return_lambda", "f = -> { return 1 }\nputs f.call\n"),
+    ("break_block_val", "[1, 2].each { |x| break x }\nputs 1\n"),
+    ("next_value", "[1, 2].each { |x| next x }\nputs 1\n"),
+    ("next_splat", "a = [1, 2]\na.each { next *a }\nputs 1\n"),
 ];
 
 /// `GATED` table from `p23_blocks.rs`.
@@ -314,6 +329,11 @@ pub const P24_SNIPPETS: &[(&str, &str)] = &[
         "def foo(a, b = 1, *c, d, e:, f: 2, **g, &h)\n  [a, b, c, d, e, f, g]\nend\nputs foo(1, 2, 3, 4, e: 5, x: 6) { 7 }\n",
     ),
     ("def_forwarding", "def foo(...)\n  1\nend\nputs foo(1, 2)\n"),
+    ("return_valued", "def f(x)\n  return x\nend\nputs f(1)\n"),
+    ("return_bare", "def f\n  return\nend\nputs f\n"),
+    ("return_toplevel", "return 1\n"),
+    ("return_multi", "def f\n  return 1, 2\nend\nputs f\n"),
+    ("return_splat", "def f(a)\n  return *a\nend\nputs f([1, 2])\n"),
 ];
 
 /// `GATED` table from `p24_defclass.rs`.
@@ -542,6 +562,23 @@ pub const P25_SNIPPETS: &[(&str, &str)] = &[
         "for_lvar_collection",
         "x = [1, 2]\nfor i in x do\n  puts i\nend\n",
     ),
+    ("break_plain", "loop do\n  break\nend\nputs 1\n"),
+    ("break_value", "x = loop do\n  break 42\nend\nputs x\n"),
+    ("break_multi", "x = loop do\n  break 1, 2\nend\nputs x\n"),
+    (
+        "break_while",
+        "i = 0\nwhile i < 3 do\n  i = i + 1\n  break if i == 2\nend\nputs i\n",
+    ),
+    ("next_plain", "1.times { next }\nputs 1\n"),
+    ("next_for", "for i in [1, 2] do\n  next\nend\nputs 1\n"),
+    (
+        "redo_loop",
+        "i = 0\nwhile i < 3 do\n  i = i + 1\n  redo if false\nend\nputs i\n",
+    ),
+    (
+        "return_in_begin",
+        "def f\n  begin\n    return 1\n  end\nend\nputs f\n",
+    ),
 ];
 
 /// `GATED` table from `p25_rescue.rs`.
@@ -632,6 +669,10 @@ pub const P26_SNIPPETS: &[(&str, &str)] = &[
         "x = 99999999999999999999999\ncase x\nin 99999999999999999999999 then puts 1\nelse puts 2\nend\n",
     ),
     ("case_in_uscore", "x = 1\ncase x\nin _ then puts 1\nelse puts 2\nend\n"),
+    (
+        "case_in_range",
+        "x = 2\ncase x\nin 1..3 then puts 1\nelse puts 2\nend\n",
+    ),
     ("case_in_alt", "x = 2\ncase x\nin 1 | 2 then puts 1\nelse puts 2\nend\n"),
     (
         "case_in_alt_chain",
@@ -911,11 +952,6 @@ pub const P26_SNIPPETS: &[(&str, &str)] = &[
 
 /// `GATED` table from `p26_specials.rs`.
 pub const P26_GATED: &[(&str, &str, &str)] = &[
-    (
-        "case_in_range_gated",
-        "x = 2\ncase x\nin 1..3 then puts 1\nelse puts 2\nend\n",
-        "RangeNode",
-    ),
     (
         "case_in_regexp_gated",
         "x = \"ab\"\ncase x\nin /a/ then puts 1\nelse puts 2\nend\n",

@@ -525,6 +525,13 @@ fn codegen_dispatch<N: BackendNode>(
             };
             codegen_defined(cg, value, val)
         }
+        "ReturnNode" => gen_return_node(cg, node, val),
+        "BreakNode" => gen_break(cg, node, val),
+        "NextNode" => gen_next(cg, node, val),
+        "RedoNode" => gen_redo(cg, node, val),
+        "RangeNode" => gen_range(cg, node, val),
+        "ParenthesesNode" => gen_parentheses(cg, node, val),
+        "ArgumentsNode" => gen_arguments(cg, node, val),
         _ => Err(unsupported(&node, "node")),
     }
 }
@@ -6247,6 +6254,290 @@ fn gen_retry<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(),
         cg.current().1.push_n(1)?;
     }
     Ok(())
+}
+
+/// Jump outside any loop (`raise_error` for `unexpected break/next/redo`):
+/// the C message with the site span.
+fn unexpected<N: BackendNode>(site: &N, message: &str) -> Diagnostic {
+    let span = site.span();
+    Diagnostic {
+        message: message.to_owned(),
+        start: span.start,
+        end: span.end,
+    }
+}
+
+/// Innermost loop visible through `begin`/`rescue` scaffolds (`loop_break`
+/// and friends skip `LOOP_BEGIN`/`LOOP_RESCUE` frames the same way).
+fn jump_target(cg: &mut Codegen) -> Option<usize> {
+    cg.current()
+        .1
+        .loops
+        .iter()
+        .rposition(|frame| !matches!(frame.kind, LoopType::Begin | LoopType::Rescue))
+}
+
+/// Single-or-array jump value (`gen_retval`): one argument codes bare (a
+/// lone splat via `ARYSPLAT`), several ride the arguments array; the value
+/// stays at the cursor with no net stack change.
+fn gen_retval<N: BackendNode>(cg: &mut Codegen, args: N) -> Result<(), Diagnostic> {
+    let Some(items) = args.call_args() else {
+        return Err(unsupported(&args, "complex arguments"));
+    };
+    if items.len() == 1 {
+        let item = items.into_iter().next().expect("single argument");
+        if item.kind_name() == "SplatNode" {
+            let Some(inner) = item.splat_value() else {
+                return Err(unsupported(&item, "splat"));
+            };
+            match inner {
+                Some(expression) => codegen(cg, expression, true)?,
+                None => gen_lvar(cg, b"*", 0)?,
+            }
+            cg.current().1.pop_n(1)?;
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_1(session, opcode::OP_ARYSPLAT, dst)?;
+        } else {
+            codegen(cg, item, true)?;
+            cg.current().1.pop_n(1)?;
+        }
+        return Ok(());
+    }
+    codegen(cg, args, true)?;
+    cg.current().1.pop_n(1)?;
+    Ok(())
+}
+
+/// Bare arguments array (`PM_ARGUMENTS_NODE`): `gen_values` plus the
+/// `ARRAY` gather, reached only through `gen_retval`'s multi-value path.
+fn gen_arguments<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(items) = node.call_args() else {
+        return Err(unsupported(&node, "complex arguments"));
+    };
+    let n = gen_values(cg, items, val, 0)?;
+    if val {
+        if n >= 0 {
+            cg.current().1.pop_n(n as u16)?;
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_2(session, opcode::OP_ARRAY, dst, n as u16)?;
+        }
+        cg.current().1.push_n(1)?;
+    }
+    Ok(())
+}
+
+/// `return` (`PM_RETURN_NODE`): valued or bare, `RETURN_BLK` inside any
+/// loop frame (blocks, loops and the `begin`/`rescue` scaffolds all push
+/// one), else `RETURN` (`return_leaves_upper_p` is always false under
+/// `MRC_TARGET_MRUBYC`).
+fn gen_return_node<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(args) = node.return_args() else {
+        return Err(unsupported(&node, "return"));
+    };
+    match args {
+        Some(arguments) => gen_retval(cg, arguments)?,
+        None => {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+        }
+    }
+    {
+        let (session, scope) = cg.current();
+        let src = scope.cursp();
+        let op = if scope.loops.is_empty() {
+            opcode::OP_RETURN
+        } else {
+            opcode::OP_RETURN_BLK
+        };
+        scope.gen_return(session, op, src)?;
+    }
+    if val {
+        cg.current().1.push_n(1)?;
+    }
+    Ok(())
+}
+
+/// `break` value and target (`loop_break`): the value lands in the loop
+/// register for `LOOP_NORMAL` (a `JMPUW` chain out), or leaves via
+/// `OP_BREAK` for block-style frames.
+fn loop_break<N: BackendNode>(
+    cg: &mut Codegen,
+    args: Option<N>,
+    site: &N,
+) -> Result<(), Diagnostic> {
+    let has_value = args.is_some();
+    if cg.current().1.loops.is_empty() {
+        if let Some(arguments) = args {
+            codegen(cg, arguments, false)?;
+        }
+        return Err(unexpected(site, "unexpected break"));
+    }
+    if let Some(arguments) = args {
+        let reg = cg.current().1.loops.last().expect("loop").reg;
+        if reg < 0 {
+            codegen(cg, arguments, false)?;
+        } else {
+            gen_retval(cg, arguments)?;
+        }
+    }
+    let Some(index) = jump_target(cg) else {
+        return Err(unexpected(site, "unexpected break"));
+    };
+    let kind = cg.current().1.loops[index].kind;
+    if kind == LoopType::Normal {
+        let reg = cg.current().1.loops[index].reg;
+        if reg >= 0 {
+            if has_value {
+                let (session, scope) = cg.current();
+                let src = scope.cursp();
+                scope.gen_move(session, reg as u16, src, false)?;
+            } else {
+                let (session, scope) = cg.current();
+                scope.genop_1(session, opcode::OP_LOADNIL, reg as u16)?;
+            }
+        }
+        let pc2 = cg.current().1.loops[index].pc2;
+        let chained = cg.current().1.genjmp(opcode::OP_JMPUW, pc2)?;
+        cg.current().1.loops[index].pc2 = chained;
+    } else {
+        if !has_value {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+        }
+        let (session, scope) = cg.current();
+        let src = scope.cursp();
+        scope.gen_return(session, opcode::OP_BREAK, src)?;
+    }
+    Ok(())
+}
+
+/// `break` (`PM_BREAK_NODE`).
+fn gen_break<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(args) = node.break_args() else {
+        return Err(unsupported(&node, "break"));
+    };
+    loop_break(cg, args, &node)?;
+    if val {
+        cg.current().1.push_n(1)?;
+    }
+    Ok(())
+}
+
+/// `next` (`PM_NEXT_NODE`): `JMPUW` to the loop head for `LOOP_NORMAL`
+/// (the operand codes `NOVAL`), else the value returns (`OP_RETURN`) for
+/// block-style frames.
+fn gen_next<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(args) = node.next_args() else {
+        return Err(unsupported(&node, "next"));
+    };
+    let Some(index) = jump_target(cg) else {
+        return Err(unexpected(&node, "unexpected next"));
+    };
+    let kind = cg.current().1.loops[index].kind;
+    if kind == LoopType::Normal {
+        if let Some(arguments) = args {
+            codegen(cg, arguments, false)?;
+        }
+        let pc0 = cg.current().1.loops[index].pc0;
+        cg.current().1.genjmp(opcode::OP_JMPUW, pc0)?;
+    } else {
+        match args {
+            Some(arguments) => gen_retval(cg, arguments)?,
+            None => {
+                let (session, scope) = cg.current();
+                let dst = scope.cursp();
+                scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+            }
+        }
+        let (session, scope) = cg.current();
+        let src = scope.cursp();
+        scope.gen_return(session, opcode::OP_RETURN, src)?;
+    }
+    if val {
+        cg.current().1.push_n(1)?;
+    }
+    Ok(())
+}
+
+/// `redo` (`PM_REDO_NODE`): `JMPUW` to the loop's redo label.
+fn gen_redo<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(index) = jump_target(cg) else {
+        return Err(unexpected(&node, "unexpected redo"));
+    };
+    let pc1 = cg.current().1.loops[index].pc1;
+    cg.current().1.genjmp(opcode::OP_JMPUW, pc1)?;
+    if val {
+        cg.current().1.push_n(1)?;
+    }
+    Ok(())
+}
+
+/// Range literal (`PM_RANGE_NODE`): both sides code in order (a missing
+/// side, endless `1..` or beginless `..3`, codes nil like any null subtree),
+/// then `RANGE_INC`/`RANGE_EXC` gathers them.
+fn gen_range<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(view) = node.range_view() else {
+        return Err(unsupported(&node, "range"));
+    };
+    match view.left {
+        Some(left) => codegen(cg, left, val)?,
+        None => {
+            if val {
+                let (session, scope) = cg.current();
+                let dst = scope.cursp();
+                scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+                scope.push_n(1)?;
+            }
+        }
+    }
+    match view.right {
+        Some(right) => codegen(cg, right, val)?,
+        None => {
+            if val {
+                let (session, scope) = cg.current();
+                let dst = scope.cursp();
+                scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+                scope.push_n(1)?;
+            }
+        }
+    }
+    if val {
+        let op = if view.exclude_end {
+            opcode::OP_RANGE_EXC
+        } else {
+            opcode::OP_RANGE_INC
+        };
+        cg.current().1.pop_n(2)?;
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_1(session, op, dst)?;
+        scope.push_n(1)?;
+    }
+    Ok(())
+}
+
+/// Parenthesized expression (`PM_PARENTHESES_NODE`): a transparent value
+/// passthrough; an empty `()` is a nil literal when valued.
+fn gen_parentheses<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(body) = node.parentheses_body() else {
+        return Err(unsupported(&node, "parentheses"));
+    };
+    match body {
+        Some(inner) => codegen(cg, inner, val),
+        None => {
+            if val {
+                let (session, scope) = cg.current();
+                let dst = scope.cursp();
+                scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+                scope.push_n(1)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Compile a parsed program tree to a RITE binary (any `BackendNode`).

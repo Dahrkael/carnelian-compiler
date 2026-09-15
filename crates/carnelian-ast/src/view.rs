@@ -235,6 +235,18 @@ pub struct GuardView<N> {
     pub is_unless: bool,
 }
 
+/// Range parts (`RangeNode`). Either side is `None` for an open-ended
+/// range (`..3`, `1..`); `exclude_end` is the `...` flag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RangeView<N> {
+    /// Left operand (`None` for a beginless range).
+    pub left: Option<N>,
+    /// Right operand (`None` for an endless range).
+    pub right: Option<N>,
+    /// `...` instead of `..`.
+    pub exclude_end: bool,
+}
+
 /// Program parts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgramView<N> {
@@ -874,6 +886,29 @@ pub trait BackendNode: AstNode + Clone + Sized {
 
     /// `defined?` operand (`DefinedNode`).
     fn defined_value(&self) -> Option<Self> {
+        None
+    }
+
+    /// `return` operand (`ReturnNode`); outer `None` is not a return,
+    /// inner `None` is a bare `return`.
+    fn return_args(&self) -> Option<Option<Self>> {
+        None
+    }
+
+    /// `break` operand (`BreakNode`); outer `None` is not a break, inner
+    /// `None` is a bare `break`.
+    fn break_args(&self) -> Option<Option<Self>> {
+        None
+    }
+
+    /// `next` operand (`NextNode`); outer `None` is not a next, inner
+    /// `None` is a bare `next`.
+    fn next_args(&self) -> Option<Option<Self>> {
+        None
+    }
+
+    /// Range parts (`RangeNode`).
+    fn range_view(&self) -> Option<RangeView<Self>> {
         None
     }
 

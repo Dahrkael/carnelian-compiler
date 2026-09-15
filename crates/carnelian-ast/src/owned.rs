@@ -8,13 +8,13 @@ use crate::view::{
     CallTargetView, CallView, CaptureView, CaseMatchView, CaseView, ClassView, ConstPathRead,
     ConstPathWrite, DefView, EnsureView, FindPatternView, ForView, GuardView, HashPatternView,
     IfView, InView, IndexTargetView, IntegerLit, KeywordParamView, LambdaView, LvarRef, LvarWrite,
-    MatchView, ModuleView, MultiTargetView, MultiWriteView, ParamsView, ProgramView,
+    MatchView, ModuleView, MultiTargetView, MultiWriteView, ParamsView, ProgramView, RangeView,
     RescueModifierView, RescueView, SclassView, SimpleLit, SuperView, VarWrite, WhenView,
     WhileView, YieldView,
 };
 use crate::{
-    arguments_node_flags, call_node_flags, loop_flags, AstNode, Integer, Node, Span, SymbolId,
-    SymbolPool, NIL_BLOCK,
+    arguments_node_flags, call_node_flags, loop_flags, range_flags, AstNode, Integer, Node, Span,
+    SymbolId, SymbolPool, NIL_BLOCK,
 };
 
 /// Borrowed owned tree plus its symbol pool.
@@ -1173,6 +1173,40 @@ impl BackendNode for Owned<'_> {
     fn implicit_value(&self) -> Option<Self> {
         match &self.node {
             Node::ImplicitNode { value, .. } => Some(self.child(value)),
+            _ => None,
+        }
+    }
+
+    fn return_args(&self) -> Option<Option<Self>> {
+        match &self.node {
+            Node::ReturnNode { arguments, .. } => Some(self.opt_child(arguments)),
+            _ => None,
+        }
+    }
+
+    fn break_args(&self) -> Option<Option<Self>> {
+        match &self.node {
+            Node::BreakNode { arguments, .. } => Some(self.opt_child(arguments)),
+            _ => None,
+        }
+    }
+
+    fn next_args(&self) -> Option<Option<Self>> {
+        match &self.node {
+            Node::NextNode { arguments, .. } => Some(self.opt_child(arguments)),
+            _ => None,
+        }
+    }
+
+    fn range_view(&self) -> Option<RangeView<Self>> {
+        match &self.node {
+            Node::RangeNode {
+                left, right, flags, ..
+            } => Some(RangeView {
+                left: self.opt_child(left),
+                right: self.opt_child(right),
+                exclude_end: flags & range_flags::EXCLUDE_END != 0,
+            }),
             _ => None,
         }
     }

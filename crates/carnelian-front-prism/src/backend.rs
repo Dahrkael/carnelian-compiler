@@ -5,7 +5,7 @@ use carnelian_ast::view::{
     CallTargetView, CallView, CaptureView, CaseMatchView, CaseView, ClassView, ConstPathRead,
     ConstPathWrite, DefView, EnsureView, FindPatternView, ForView, GuardView, HashPatternView,
     IfView, InView, IndexTargetView, IntegerLit, KeywordParamView, LambdaView, LvarRef, LvarWrite,
-    MatchView, ModuleView, MultiTargetView, MultiWriteView, ParamsView, ProgramView,
+    MatchView, ModuleView, MultiTargetView, MultiWriteView, ParamsView, ProgramView, RangeView,
     RescueModifierView, RescueView, SclassView, SimpleLit, SuperView, VarWrite, WhenView,
     WhileView, YieldView,
 };
@@ -844,6 +844,30 @@ impl BackendNode for PrismNode<'_> {
     fn implicit_value(&self) -> Option<Self> {
         let node = self.inner.as_implicit_node()?;
         Some(wrap(node.value()))
+    }
+
+    fn return_args(&self) -> Option<Option<Self>> {
+        let node = self.inner.as_return_node()?;
+        Some(node.arguments().map(|arguments| wrap(arguments.as_node())))
+    }
+
+    fn break_args(&self) -> Option<Option<Self>> {
+        let node = self.inner.as_break_node()?;
+        Some(node.arguments().map(|arguments| wrap(arguments.as_node())))
+    }
+
+    fn next_args(&self) -> Option<Option<Self>> {
+        let node = self.inner.as_next_node()?;
+        Some(node.arguments().map(|arguments| wrap(arguments.as_node())))
+    }
+
+    fn range_view(&self) -> Option<RangeView<Self>> {
+        let node = self.inner.as_range_node()?;
+        Some(RangeView {
+            left: node.left().map(wrap),
+            right: node.right().map(wrap),
+            exclude_end: node.is_exclude_end(),
+        })
     }
 
     fn parentheses_body(&self) -> Option<Option<Self>> {
