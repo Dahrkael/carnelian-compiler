@@ -12,7 +12,7 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 rust-version = "1.82"
-license = "MIT OR Apache-2.0"
+license = "BSD-2-Clause"
 
 [workspace.dependencies]
 carnelian-ast = { path = "crates/carnelian-ast" }

@@ -42,12 +42,13 @@
 			<span id="wasm-state">loading wasm…</span>
 		</div>
 		<div class="cols">
-			<div class="col"><h2>Source</h2><textarea id="editor" spellcheck="false">{{DEFAULT_SOURCE}}</textarea></div>
+			<div class="col"><h2>Source</h2><textarea id="editor" spellcheck="false">puts 1 + 2 * 3
+</textarea></div>
 			<div class="col"><h2>AST</h2><div id="ast"></div><pre id="ast-debug" class="wrap"></pre></div>
 			<div class="col"><h2>Bytecode</h2><pre id="disasm"></pre></div>
 			<div class="col"><h2>Console</h2><pre id="console" class="wrap"></pre></div>
 		</div>
-		<footer>{{PINS_FOOTER}}</footer>
+		<footer><span><b>C compiler</b>: `mruby-compiler2 0.5.0`</span><span><b>C parser</b>: `Prism 1.9.0`</span><span><b>MRI parser</b>: `lib-ruby-parser 4.0.6+ruby-3.1.2`</span><span><b>Format</b>: `RITE0400`</span><span><b>Build config</b>: `PICORB_VM_MRUBYC` (`MRC_TARGET_MRUBYC`), `MRBC_ALLOC_LIBC`, `MRB_NO_PRESYM`, `MRB_INT64=1`, `PRISM_BUILD_MINIMAL`, `PRISM_XALLOCATOR`</span><span><b>Int</b>: 64-bit</span><span><b>Binary header</b>: `RITE0400` / compiler `HSMK` / version `0000` / IREP section `0400`</span></footer>
 		<script type="module" src="app.js"></script>
 	</body>
 </html>
