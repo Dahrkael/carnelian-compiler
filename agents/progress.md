@@ -401,3 +401,30 @@ plus the `PINS.md` row and this note). Frozen contracts untouched:
   `BlockPass` positions (both grammars parse-reject; the shapes are
   documented); single-parse CLI (harmless, matches existing arms);
   span-style nits (byte-harmless).
+
+## Playground + CLI features (worktree feature/playground, unmerged)
+
+- CLI: two-axis split `reference` (C golden) + `prism` (C parser),
+  `default = both`. Pure build (`--no-default-features`) keeps
+  `compile --frontend mri`, `--pins`, `--help`; `reference`/`verify` and
+  `prism`/`owned` vanish (exit 2 with pointer to `mri`). Proven pure via
+  `cargo tree` (no sys/bindgen/cc) and green pure test legs.
+- Playground crate: offline static site generator (textarea editor,
+  JSON AST, hex+sections+disasm viewers, console). Executes on the
+  pinned mrubyedge fork (playground-only dep) with capturing `puts`/`p`
+  natives (thread-local, shared native/wasm path) and a fail-closed
+  bigint gate before load — the fork still panics on pool type 7
+  (probed `rite.rs:253`), so the gate stands.
+- `puts` splats arrays per MRI (depth-capped `[...]` on cycles);
+  multi-arg/nil/bare forms covered by tests. `OP_NAMES` pinned to
+  backend constants via `debug_assert`s.
+- Exit state: workspace suite green (default + pure legs), playground
+  tests green in debug and release, clippy/fmt clean, wasm checks pass
+  (`ast`+`compiler`+`front-mri`+playground lib).
+- Reviewer round (applied): fixed vacuous mri-vs-mri compare in
+  `roundtrip.rs`, per-combo comments, `pg_*` ungated marker, `main.rs`
+  missing-subcommand message per feature set, `--release` threading in
+  `build_wasm`, README claim scoping. Declined: middle-combo test
+  splits (default-full + pure are the certification vehicles),
+  `dist/` gitignore change (root `/dist/` already covers it),
+  `recv_ready` threading (still deferred).
