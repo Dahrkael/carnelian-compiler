@@ -224,7 +224,7 @@ Reference probe results (pinned `mruby-compiler2 0.5.0`):
   calls (deferred; same fail-closed family as the pre-existing splat
   chain gate).
 
-## P3.3 parity harness + CLI owned path (worktree feature/p3-owned, unmerged)
+## P3.3 parity harness + CLI owned path (merged to dev)
 
 Scope: `carnelian-cli` only (`src/main.rs`, `Cargo.toml`, `tests/*`).
 Frozen files untouched: `view.rs`, `handlers.rs`, `front-owned`
@@ -309,7 +309,7 @@ Frozen files untouched: `view.rs`, `handlers.rs`, `front-owned`
   `front-mri` phase typo: Fase 4, not 3). Declined: wiring the inert
   `front-*` feature flags (P4 owns that).
 
-## P4-C: CLI wiring + parity suite + pins (worktree feature/p4-mri, unmerged)
+## P4-C: CLI wiring + parity suite + pins (merged to dev)
 
 Scope: `carnelian-cli` only (`Cargo.toml`, `src/main.rs`, `tests/*`,
 plus the `PINS.md` row and this note). Frozen contracts untouched:
@@ -402,7 +402,7 @@ plus the `PINS.md` row and this note). Frozen contracts untouched:
   documented); single-parse CLI (harmless, matches existing arms);
   span-style nits (byte-harmless).
 
-## Playground + CLI features (worktree feature/playground, unmerged)
+## Playground + CLI features (merged to dev)
 
 - CLI: two-axis split `reference` (C golden) + `prism` (C parser),
   `default = both`. Pure build (`--no-default-features`) keeps
@@ -427,4 +427,109 @@ plus the `PINS.md` row and this note). Frozen contracts untouched:
   `build_wasm`, README claim scoping. Declined: middle-combo test
   splits (default-full + pure are the certification vehicles),
   `dist/` gitignore change (root `/dist/` already covers it),
-  `recv_ready` threading (still deferred).
+   `recv_ready` threading (closed below, no longer deferred).
+
+## P2.6 pattern matching (merged to dev)
+
+- Port of `codegen_pattern` + `codegen_pattern_1` (~1100-line section in
+  `handlers.rs` after `gen_case`): `gen_pattern_eqq`,
+  `gen_pattern_respond_to` (block-slot dance + cache move),
+  `gen_pattern_deconstruct` (`JMPNIL`/`JMPNOT` cache chain),
+  `pattern_deconstructs`, `gen_pattern_fail_jmp`, rlev-guarded
+  `codegen_pattern` (`too complex pattern`), all `codegen_pattern_1` arms
+  (literals via `===`, LVTarget bind, implicit with cache=0, alternation
+  with `JMPNOT`→`JMPIF` rewrite, capture, both pins, array known-len +
+  deconstruct paths, hash via `deconstruct_keys`/`__pat_values`/`__except`/
+  `dup`, find search loop) plus the `MATCH_PREDICATE`/`MATCH_REQUIRED`/
+  `CASE_MATCH` call sites (deconstruct cache, `known_array_len` opt,
+  `MATCHERR` else). New `BackendNode` views (`CaseMatch/In/Match/`
+  `Alternation/Capture/ArrayPattern/HashPattern/FindPattern/Guard`) in
+  `view.rs`, implemented for `Owned` and `PrismNode`; `Scope::emit_s`
+  (positional `u16` overwrite for the alternation peephole rewrite).
+- Corpus: the 3 pattern gates moved to live snippets; 64 P26 snippets +
+  reference probes (260-element array `AREF` rebase, `req_multi`,
+  `find_const`, neg/bigint ints, `_`, interpolated-string pattern,
+  `y = x in 1`), all 4-way × both modes.
+- Deviation: the value-pattern arm dispatches on kind name — literal kinds
+  the expression backend also gates (`RangeNode`, regexps, xstring,
+  rational/imaginary, `isym`/`iregexp`) stay gated instead of diverging.
+  `=~` (`match_write`) is a separate C case, out of scope, stays gated.
+  `case_in_alt_capture` stays gated (reference rejects binds in `|`).
+- Front-mri fixes found by divergence (each proven sole cause, no
+  regression in the other 300+ snippets): `ArrayPatternWithTail` →
+  `ImplicitRestNode` rest, `{a:}` shorthand → `AssocNode(Symbol,
+  LVTarget)`, `Const(FindPattern)` keeps its constant, `LocalVariableWrite`
+  binds LHS before walking value (source order), guard reads inner pattern
+  from wrapper statements.
+
+## DEBUG section (merged to dev)
+
+- Full `debug.c` port (user decision, not minimal): `DebugInfo`
+  (`DebugFile{start_pos,filename,lines}`) on `Irep`, `lines`/`lineno`/
+  `filename`/`debug_start_pos` tracking on `Scope` (parent inherits
+  filename+lineno, `-e` default like `mrc_load_string_cxt`), per-byte line
+  rule in `emit_b`, per-node `lineno` at `codegen()` entry, packed-int
+  (LEB128) + `pack_line_map` + filename-table/record/section encoder in new
+  `debug.rs`. `compile_tree` without source emits zero-line DBG; new
+  `compile_tree_with_source` carries real lines (CLI prism/owned and
+  front-mri `compile()` use it). `stripped=true` clears debug; writer keeps
+  `IREP,DEBUG,LVAR,END` order; reader stays verbatim.
+- Deviation from plan §8 (certification): `verify` and all parity mirrors
+  compare `without_debug(bytes)` (read → clear `debug_raw` + recursive
+  `clear_debug` → rewrite) instead of raw bytes, until the pinned
+  reference emits `DBG` (it dumps with flags `0`). Writer round-trip tests
+  stay byte-exact, including `DBG`. Smoke: `puts 1` unstripped gains a
+  35-byte `DBG` (`-e`, packed `[0,1,6,1]`), `--strip` omits it.
+
+## Deferred closed (merged to dev)
+
+- `recv_ready` threading: the C `gen_call` has no arg/block
+  discrimination on the chain path, so the complex-args gate and the block
+  gate in `gen_call_impl` plus the same-family block gate in
+  `gen_defined_recv` were removed (the third gate exceeds the brief by 6
+  lines; `defined?(foo{}.bar)` probes exit 0 on the reference and is now
+  byte-identical). Only the identical `KeywordHashNode`-tail split became
+  shared (`split_keywords`); `st`-vs-`noop/nargs/nk` bookkeeping stays
+  separate. 14 defined?-chain goldens, all 4-way × both modes.
+- Helpers unified in `carnelian-ast` (pure, wasm-safe): one
+  `limbs_to_decimal`, one `NIL_BLOCK: u32 = 8`. Nothing else unified
+  (`scope_body` tails, `gen_def` arms stay as declined before).
+- Kept fail-closed with reference-probe evidence (exit 1 both sides, no
+  golden can exist): `a[0, &b] = 1` index writes with `&`, toplevel
+  `o.b(1, ...)` / `o.b(*)` forwarding shapes.
+
+## Integration of P2.6/DEBUG/deferred (coordinator, dev)
+
+- Implemented in three worktrees (`feature/p2-6-pattern`,
+  `feature/dbg-section`, `feature/deferred-calls-helpers`), integrated to
+  `dev` in order B → C → D; `master` untouched throughout. Conflicts
+  resolved: C's strip-compare onto B's rewritten `p26_specials.rs`
+  (header + `stripped()` helper), B+D union in `P26_SNIPPETS`/`P26_GATED`
+  (disjoint entries; the 2 `defined_chain_*_gated` removed by D), D's
+  import/deletion hunk onto B's rewritten `front-prism/backend.rs`, stale
+  chain-gate doc line dropped.
+- Exit state: full workspace suite green, `clippy --all-targets --
+  -D warnings` clean, `fmt --check` clean, `wasm32-unknown-unknown` check
+  of `ast`+`compiler`+`front-mri` passes.
+
+## Reviewer round on the integration (applied, dev worktree)
+
+- Real bug fixed: `emit_b` tagged patched bytes with the active line, so
+  `dispatch`/`emit_s` jump patches and the alternation `JMPNOT`→`JMPIF`
+  rewrite corrupted `DBG` lines (byte-harmless while `verify` strips
+  `DBG`, divergent once the reference emits it). Split into `poke_b`
+  (raw, used by `dispatch`/`emit_s`/the opcode rewrite) and `emit_b`
+  (poke + line rule, used by the `gen_*` paths); regression test
+  `jump_patches_keep_the_original_line`. Re-certified: workspace suite
+  green, `clippy -D warnings` / `fmt --check` clean.
+- Suggestions left as follow-ups (all byte-harmless today, suite green
+  via stripped comparison): dedup the value-pattern `===` sequence into
+  `gen_pattern_eqq`; gate the alternation rewrite on unextended jumps
+  (latent `EXT1` divergence); fail-closed `Err` on non-`AssocNode` hash
+  pattern elements; `Option<u16>` sentinel for `gen_case_match` head;
+  `try_from` instead of `as u16/u32` casts in the `DBG` encoder and array
+  pattern counts.
+- Declined with reason (checked clean): `HashMap` order, pool/sym order,
+  peephole/`lastpc` chains, wire widths, `unsafe`/FFI in shipping path,
+  `split_keywords` scope, single debug encoder, `recv_ready` liveness,
+  helper unification, `debug_start_pos` placeholder, front-MRI fixes.
