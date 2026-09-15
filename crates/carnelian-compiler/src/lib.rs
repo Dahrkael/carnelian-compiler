@@ -5,6 +5,7 @@
 //! boundary; this crate never sees C.
 
 pub mod codegen;
+pub mod debug;
 pub mod diagnostics;
 pub mod handlers;
 pub mod irep;
@@ -13,9 +14,10 @@ pub mod reader;
 pub mod writer;
 
 pub use codegen::{CodegenError, Session};
+pub use debug::{clear_debug, debug_defined, encode_debug_section, pack_line_map, without_debug};
 pub use diagnostics::{Diagnostic, Diagnostics};
-pub use handlers::{codegen, compile_tree, Codegen};
-pub use irep::{CatchHandler, Irep, PoolValue, RiteModel};
+pub use handlers::{codegen, compile_tree, compile_tree_with_source, Codegen};
+pub use irep::{CatchHandler, DebugFile, DebugInfo, Irep, PoolValue, RiteModel};
 pub use reader::{read_rite, ReadError};
 pub use writer::{roundtrip, write_rite};
 

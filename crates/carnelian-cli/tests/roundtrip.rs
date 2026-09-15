@@ -15,6 +15,12 @@ fn carnelian() -> Command {
     Command::new(env!("CARGO_BIN_EXE_carnelian"))
 }
 
+/// Bytes with the `DBG` section removed (cross-frontend parity ignores
+/// debug info; the writer round-trip above stays byte-exact).
+fn without_debug(bytes: &[u8]) -> Vec<u8> {
+    carnelian_compiler::without_debug(bytes).expect("strip debug")
+}
+
 #[cfg(feature = "reference")]
 #[test]
 fn reference_and_verify_are_byte_identical() {
@@ -88,7 +94,7 @@ fn cli_exit_codes() {
     );
     assert!(output.exists());
 
-    // `compile --frontend owned` matches `prism` byte for byte (exit 0).
+    // `compile --frontend owned` matches `prism` ignoring `DBG` bytes.
     let owned_out = dir.path().join("ok.owned.mrb");
     #[cfg(feature = "prism")]
     {
@@ -108,14 +114,14 @@ fn cli_exit_codes() {
             String::from_utf8_lossy(&owned.stderr)
         );
         assert_eq!(
-            std::fs::read(&output).expect("read prism output"),
-            std::fs::read(&owned_out).expect("read owned output"),
+            without_debug(&std::fs::read(&output).expect("read prism output")),
+            without_debug(&std::fs::read(&owned_out).expect("read owned output")),
             "owned diverges from prism"
         );
     }
 
     // `compile --frontend mri` succeeds (exit 0) and matches the default
-    // frontend byte for byte. In pure builds the default is mri itself,
+    // frontend ignoring `DBG` bytes. In pure builds the default is mri itself,
     // so the cross-frontend comparison only runs with prism linked.
     let mri_out = dir.path().join("ok.mri.mrb");
     let mri = carnelian()
@@ -135,8 +141,8 @@ fn cli_exit_codes() {
     );
     #[cfg(feature = "prism")]
     assert_eq!(
-        std::fs::read(&output).expect("read default output"),
-        std::fs::read(&mri_out).expect("read mri output"),
+        without_debug(&std::fs::read(&output).expect("read default output")),
+        without_debug(&std::fs::read(&mri_out).expect("read mri output")),
         "mri diverges from prism"
     );
 

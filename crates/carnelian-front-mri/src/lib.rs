@@ -63,5 +63,5 @@ pub fn compile(source: &str, opts: &CompileOptions) -> Result<Vec<u8>, Diagnosti
         node: &node,
         pool: &pool,
     };
-    carnelian_compiler::compile_tree(owned, opts)
+    carnelian_compiler::compile_tree_with_source(owned, opts, source.as_bytes())
 }

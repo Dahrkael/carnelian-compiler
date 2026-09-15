@@ -164,6 +164,9 @@ pub struct Codegen {
     session: Session,
     scopes: Vec<Scope>,
     root: Option<Irep>,
+    /// Line-start byte offsets of the source (`None` without source: lines
+    /// stay `0`, as for synthetic trees).
+    source_lines: Option<Vec<u32>>,
 }
 
 impl Codegen {
@@ -173,7 +176,35 @@ impl Codegen {
             session: Session::new(),
             scopes: vec![Scope::top()],
             root: None,
+            source_lines: None,
         }
+    }
+
+    /// Install the compile filename on the top scope; children inherit it
+    /// (`generate_code` seeds `scope->filename` from the filename table).
+    pub fn set_filename(&mut self, filename: &[u8]) {
+        if let Some(top) = self.scopes.first_mut() {
+            top.filename = filename.to_vec();
+        }
+    }
+
+    /// Install the source for offset-to-line mapping (`node_lineno` reads
+    /// the parser newline list; this is the same table, 1-based lines).
+    pub fn set_source(&mut self, source: &[u8]) {
+        let mut starts = vec![0u32];
+        for (index, byte) in source.iter().enumerate() {
+            if *byte == b'\n' {
+                starts.push(index as u32 + 1);
+            }
+        }
+        self.source_lines = Some(starts);
+    }
+
+    /// Line of a byte offset, or `None` without source.
+    fn line_for(&self, offset: u32) -> Option<u16> {
+        let starts = self.source_lines.as_ref()?;
+        let line = starts.partition_point(|start| *start <= offset);
+        Some(line.min(u16::MAX as usize) as u16)
     }
 
     /// Current session and scope (disjoint borrows).
@@ -396,6 +427,12 @@ fn emit_absent_else(cg: &mut Codegen) -> Result<(), Diagnostic> {
 /// Main dispatch (`codegen()` switch) with the `s->rlev` save/restore that
 /// surrounds every C node walk.
 pub fn codegen<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    // Every node sets the active line before dispatch (`s->lineno`), so
+    // each emitted byte carries its node's line.
+    let line = cg.line_for(node.span().start);
+    if let Some(line) = line {
+        cg.current().1.lineno = line;
+    }
     let rlev = cg.current().1.rlev;
     let result = codegen_dispatch(cg, node, val);
     cg.current().1.rlev = rlev;
@@ -6236,17 +6273,43 @@ fn gen_retry<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(),
 
 /// Compile a parsed program tree to a RITE binary (any `BackendNode`).
 ///
-/// The reference dumps with flags `0`, so `stripped` currently changes no
-/// byte; both modes must match the same golden (see `agents/progress.md`).
+/// `stripped=false` emits a real `DBG` section (filename table plus packed
+/// line maps, parent and child ireps); `stripped=true` omits it. The
+/// reference still dumps with flags `0`, so `verify` compares
+/// debug-stripped bytes (see `without_debug`).
 pub fn compile_tree<N: BackendNode>(
     root: N,
-    _opts: &CompileOptions,
+    opts: &CompileOptions,
+) -> Result<Vec<u8>, Diagnostics> {
+    compile_tree_impl(root, opts, None)
+}
+
+/// Compile with source for line mapping; lines land in the `DBG` section.
+/// `filename` in `opts` names the debug file entry (default `"-e"`, like
+/// `mrc_load_string_cxt`).
+pub fn compile_tree_with_source<N: BackendNode>(
+    root: N,
+    opts: &CompileOptions,
+    source: &[u8],
+) -> Result<Vec<u8>, Diagnostics> {
+    compile_tree_impl(root, opts, Some(source))
+}
+
+fn compile_tree_impl<N: BackendNode>(
+    root: N,
+    opts: &CompileOptions,
+    source: Option<&[u8]>,
 ) -> Result<Vec<u8>, Diagnostics> {
     let mut cg = Codegen::new();
+    let filename = opts.filename.clone().unwrap_or_else(|| "-e".to_owned());
+    cg.set_filename(filename.as_bytes());
+    if let Some(source) = source {
+        cg.set_source(source);
+    }
     codegen(&mut cg, root, true).map_err(|single| Diagnostics {
         entries: vec![single],
     })?;
-    let Some(irep) = cg.root.take() else {
+    let Some(mut irep) = cg.root.take() else {
         return Err(Diagnostics {
             entries: vec![Diagnostic {
                 message: "expected a program root".to_owned(),
@@ -6255,6 +6318,9 @@ pub fn compile_tree<N: BackendNode>(
             }],
         });
     };
+    if opts.stripped {
+        crate::debug::clear_debug(&mut irep);
+    }
     let lvar_syms = if cg.session.any_lv {
         Some(cg.session.lvar_names.clone())
     } else {

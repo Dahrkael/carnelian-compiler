@@ -1,6 +1,6 @@
 //! P2.5 certification (rescue/ensure, splat, kwargs, masgn): `verify` compares
-//! `compile --frontend prism` against the pinned C golden, byte for byte, in
-//! both strip modes. Exit `0` required. Pattern matching and the still-gated
+//! `compile --frontend prism` against the pinned C golden, ignoring `DBG`
+//! bytes, in both strip modes. Exit `0` required. Pattern matching and the still-gated
 //! assignment targets are locked as diagnostics below, never as diverging
 //! bytes.
 
@@ -15,6 +15,12 @@ use corpus::{P25_GATED as GATED, P25_SNIPPETS as SNIPPETS};
 
 fn carnelian() -> Command {
     Command::new(env!("CARGO_BIN_EXE_carnelian"))
+}
+
+/// Bytes with the `DBG` section removed (`verify` ignores debug info until
+/// the pinned reference emits it).
+fn stripped(bytes: &[u8]) -> Vec<u8> {
+    carnelian_compiler::without_debug(bytes).expect("strip debug")
 }
 
 fn check_identical(name: &str, source: &str) {
@@ -36,7 +42,7 @@ fn check_identical(name: &str, source: &str) {
         String::from_utf8_lossy(&verify.stderr)
     );
 
-    // `compile` output must also match the golden file byte for byte.
+    // `compile` output must match the golden file ignoring `DBG` bytes.
     let golden = dir.path().join(format!("{name}.mrb"));
     let reference = carnelian()
         .arg("reference")
@@ -61,8 +67,8 @@ fn check_identical(name: &str, source: &str) {
             String::from_utf8_lossy(&compiled.stderr)
         );
         assert_eq!(
-            std::fs::read(&golden).expect("read golden"),
-            std::fs::read(&out).expect("read output"),
+            stripped(&std::fs::read(&golden).expect("read golden")),
+            stripped(&std::fs::read(&out).expect("read output")),
             "{name} (strip={strip}): bytes diverge"
         );
     }

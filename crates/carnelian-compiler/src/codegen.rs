@@ -7,7 +7,7 @@
 use carnelian_ast::{SymbolId, SymbolPool};
 
 use crate::diagnostics::Diagnostic;
-use crate::irep::{CatchHandler, Irep, PoolValue};
+use crate::irep::{CatchHandler, DebugFile, DebugInfo, Irep, PoolValue};
 use crate::opcode::{self, Decoded};
 
 /// Jump chain empty marker (`JMPLINK_START`).
@@ -87,6 +87,14 @@ pub struct Scope {
     pub aspec: u32,
     /// Emitted bytecode.
     pub iseq: Vec<u8>,
+    /// Per-pc source lines, parallel to `iseq` (`s->lines`).
+    pub lines: Vec<u16>,
+    /// Active source line (`s->lineno`); the backend sets it per node.
+    pub lineno: u16,
+    /// Source filename of this scope (`s->filename`).
+    pub filename: Vec<u8>,
+    /// First pc of the pending debug file (`s->debug_start_pos`).
+    pub debug_start_pos: u32,
     /// Constant pool under construction.
     pub pool: Vec<CgPool>,
     /// Interned symbols referenced by this scope.
@@ -129,7 +137,8 @@ fn error(message: &str) -> Diagnostic {
 pub type CodegenError = Diagnostic;
 
 impl Session {
-    /// New session; the filename defaults to `"-e"` like `mrc_load_string_cxt`.
+    /// New session; scope filenames default to `"-e"` like
+    /// `mrc_load_string_cxt` (see `Scope::top`).
     pub fn new() -> Self {
         Self::default()
     }
@@ -168,6 +177,10 @@ impl Scope {
             mscope: false,
             aspec: 0,
             iseq: Vec::new(),
+            lines: Vec::new(),
+            lineno: 0,
+            filename: b"-e".to_vec(),
+            debug_start_pos: 0,
             pool: Vec::new(),
             syms: Vec::new(),
             scapa: 256,
@@ -187,7 +200,7 @@ impl Scope {
     /// Child scope (`scope_new` with `prev` set).
     pub fn child(
         session: &mut Session,
-        _parent: &Scope,
+        parent: &Scope,
         locals: &[Vec<u8>],
     ) -> Result<Self, Diagnostic> {
         if locals.len() >= u8::MAX as usize {
@@ -207,6 +220,10 @@ impl Scope {
             mscope: false,
             aspec: 0,
             iseq: Vec::with_capacity(1024),
+            lines: Vec::new(),
+            lineno: parent.lineno,
+            filename: parent.filename.clone(),
+            debug_start_pos: 0,
             pool: Vec::with_capacity(32),
             syms: Vec::with_capacity(256),
             scapa: 256,
@@ -274,8 +291,9 @@ impl Scope {
         Ok(())
     }
 
-    /// Emit one byte at `pc`, growing the buffer (`emit_B`).
-    fn emit_b(&mut self, pc: u32, byte: u8) -> Result<(), Diagnostic> {
+    /// Raw byte poke at `pc`, growing the buffer (`emit_B`). Never touches
+    /// line info: patches rewrite bytes emitted under an older line.
+    fn poke_b(&mut self, pc: u32, byte: u8) -> Result<(), Diagnostic> {
         if pc == u32::MAX {
             return Err(error("too big code block"));
         }
@@ -283,8 +301,23 @@ impl Scope {
         if index >= self.iseq.len() {
             let grown = (self.iseq.len().max(1) * 2).max(index + 1);
             self.iseq.resize(grown, 0);
+            self.lines.resize(grown, 0);
         }
         self.iseq[index] = byte;
+        Ok(())
+    }
+
+    /// Emit one byte at `pc`, growing the buffer and tagging the active
+    /// line (`gen_B`: poke plus `s->lines[pc]` bookkeeping; with no line
+    /// yet it repeats the previous one).
+    fn emit_b(&mut self, pc: u32, byte: u8) -> Result<(), Diagnostic> {
+        self.poke_b(pc, byte)?;
+        let index = pc as usize;
+        if self.lineno > 0 || index == 0 {
+            self.lines[index] = self.lineno;
+        } else {
+            self.lines[index] = self.lines[index - 1];
+        }
         Ok(())
     }
 
@@ -407,10 +440,11 @@ impl Scope {
         self.gen_b((a & 0xff) as u8)
     }
 
-    /// Overwrite a big-endian `u16` at `pos` (`emit_S`).
+    /// Overwrite a big-endian `u16` at `pos` without touching lines
+    /// (patch path; cf. `dispatch`).
     pub fn emit_s(&mut self, pos: u32, value: u16) -> Result<(), Diagnostic> {
-        self.emit_b(pos, (value >> 8) as u8)?;
-        self.emit_b(pos + 1, (value & 0xff) as u8)
+        self.poke_b(pos, (value >> 8) as u8)?;
+        self.poke_b(pos + 1, (value & 0xff) as u8)
     }
 
     /// Fresh jump target marker (`new_label`).
@@ -598,8 +632,8 @@ impl Scope {
         // initial `JMPLINK_START` link reads back as a negative value whose
         // addition lands on zero to end the chain).
         let linked = i16::from_be_bytes([self.iseq[pos0 as usize], self.iseq[pos0 as usize + 1]]);
-        self.emit_b(pos0, (offset >> 8) as u8)?;
-        self.emit_b(pos0 + 1, (offset & 0xff) as u8)?;
+        self.poke_b(pos0, (offset >> 8) as u8)?;
+        self.poke_b(pos0 + 1, (offset & 0xff) as u8)?;
         if linked == 0 {
             return Ok(0);
         }
@@ -1134,6 +1168,19 @@ impl Scope {
             }
         }
         self.iseq.truncate(self.pc as usize);
+        self.lines.truncate(self.pc as usize);
+        // One debug file per scope (`scope_finish` appends `[debug_start_pos,
+        // pc)`; an empty scope yields no file but keeps its debug info).
+        let start = self.debug_start_pos as usize;
+        let files = if (self.pc as usize) > start {
+            vec![DebugFile {
+                start_pos: self.debug_start_pos,
+                filename: self.filename.clone(),
+                lines: self.lines[start..].to_vec(),
+            }]
+        } else {
+            Vec::new()
+        };
         Ok(Irep {
             nlocals: self.nlocals,
             nregs: self.nregs,
@@ -1143,6 +1190,7 @@ impl Scope {
             syms,
             reps: self.reps,
             lv,
+            debug: Some(DebugInfo { files }),
         })
     }
 }

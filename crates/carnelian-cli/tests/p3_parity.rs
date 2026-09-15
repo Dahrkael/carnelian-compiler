@@ -1,5 +1,6 @@
 //! P3 parity (owned frontend): `reference` == `compile --frontend prism` ==
-//! `compile --frontend owned` for every shared snippet, in both strip modes.
+//! `compile --frontend owned` for every shared snippet, ignoring `DBG`
+//! bytes, in both strip modes.
 //! Gated cases must fail with the same diagnostic marker under both
 //! frontends. Needs the P3.1 lowering and the P3.2 `BackendNode` impl; until
 //! those land the owned comparisons fail.
@@ -27,6 +28,13 @@ fn first_divergence(a: &[u8], b: &[u8]) -> Option<usize> {
         return Some(a.len().min(b.len()));
     }
     None
+}
+
+/// Bytes with the `DBG` section removed (parity ignores debug info until
+/// the pinned reference emits it).
+#[cfg(all(feature = "reference", feature = "prism"))]
+fn stripped(bytes: &[u8]) -> Vec<u8> {
+    carnelian_compiler::without_debug(bytes).expect("strip debug")
 }
 
 #[cfg(all(feature = "reference", feature = "prism"))]
@@ -85,14 +93,14 @@ fn compile_bytes(
 fn check_parity(origin: &str, name: &str, source: &str) {
     let scoped = format!("{origin}_{name}");
     let dir = tempfile::tempdir().expect("tempdir");
-    let golden = reference_bytes(&scoped, source, dir.path());
+    let golden = stripped(&reference_bytes(&scoped, source, dir.path()));
     for strip in [false, true] {
-        let prism = compile_bytes(&scoped, source, dir.path(), strip, "prism");
+        let prism = stripped(&compile_bytes(&scoped, source, dir.path(), strip, "prism"));
         assert!(
             first_divergence(&golden, &prism).is_none(),
             "{scoped} (prism, strip={strip}): bytes diverge"
         );
-        let owned = compile_bytes(&scoped, source, dir.path(), strip, "owned");
+        let owned = stripped(&compile_bytes(&scoped, source, dir.path(), strip, "owned"));
         assert!(
             first_divergence(&golden, &owned).is_none(),
             "{scoped} (owned, strip={strip}): bytes diverge"
@@ -182,7 +190,8 @@ fn p3_gated_agreement() {
 }
 
 // Host-only fixture: a hand-built owned tree through `compile_tree::<Owned>`
-// with no FFI involved, asserting the exact reference bytes. This is the
+// with no FFI involved, asserting the reference bytes ignoring `DBG` (the
+// fixture carries no source, so its lines are all zero). This is the
 // shipping (`wasm32`) path exercised on the host.
 const EXPECTED_EMPTY_MRB: &[u8] = &[
     0x52, 0x49, 0x54, 0x45, 0x30, 0x34, 0x30, 0x30, 0x00, 0x00, 0x00, 0x3e, 0x48, 0x53, 0x4d, 0x4b,
@@ -224,7 +233,11 @@ fn owned_fixture_empty_program_is_byte_identical() {
         statements: Box::new(body),
     };
     let pool = carnelian_ast::SymbolPool::new();
-    assert_eq!(compile_owned_tree(&root, &pool), EXPECTED_EMPTY_MRB);
+    assert_eq!(
+        carnelian_compiler::without_debug(&compile_owned_tree(&root, &pool))
+            .expect("fixture strips"),
+        EXPECTED_EMPTY_MRB
+    );
 }
 
 #[test]
@@ -267,5 +280,9 @@ fn owned_fixture_puts_int_is_byte_identical() {
         locals: Vec::new(),
         statements: Box::new(body),
     };
-    assert_eq!(compile_owned_tree(&root, &pool), EXPECTED_PUTS1_MRB);
+    assert_eq!(
+        carnelian_compiler::without_debug(&compile_owned_tree(&root, &pool))
+            .expect("fixture strips"),
+        EXPECTED_PUTS1_MRB
+    );
 }

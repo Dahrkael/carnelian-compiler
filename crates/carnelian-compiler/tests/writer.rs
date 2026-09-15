@@ -1,6 +1,9 @@
 //! Writer/reader unit tests over synthetic models (no C reference needed).
 
-use carnelian_compiler::{read_rite, write_rite, Irep, PoolValue, RiteModel};
+use carnelian_compiler::{
+    encode_debug_section, pack_line_map, read_rite, without_debug, write_rite, DebugFile,
+    DebugInfo, Irep, PoolValue, RiteModel,
+};
 
 fn minimal_root() -> Irep {
     Irep {
@@ -171,4 +174,118 @@ fn debug_raw_is_preserved_verbatim() {
     assert!(bytes.windows(raw.len()).any(|window| window == raw));
     let back = read_rite(&bytes).expect("parses");
     assert_eq!(back.debug_raw, Some(raw));
+}
+
+#[test]
+fn pack_line_map_collapses_runs() {
+    // `mrc_debug_info_append_file` with `start_pos = 0`: each run emits
+    // the pc delta then the line delta, both seeded from zero.
+    assert_eq!(
+        pack_line_map(0, &[1, 1, 2, 2, 2, 5]),
+        vec![0, 1, 2, 1, 3, 3]
+    );
+    // Nonzero `start_pos` seeds the first pc delta absolutely.
+    assert_eq!(pack_line_map(10, &[3, 3]), vec![10, 3]);
+    // A zero first line matches the seed, so nothing is emitted.
+    assert!(pack_line_map(0, &[0, 0]).is_empty());
+}
+
+fn debug_file(lines: &[u16]) -> DebugFile {
+    DebugFile {
+        start_pos: 0,
+        filename: b"-e".to_vec(),
+        lines: lines.to_vec(),
+    }
+}
+
+#[test]
+fn debug_section_layout_matches_dump_c() {
+    // Synthetic expectations from the C layout: `DBG\0` header, filename
+    // table without NULs, then one record per irep in preorder (size,
+    // file count, `start_pos`, filename index, entry count, line type
+    // `2` = packed map, packed bytes).
+    let liney = Irep {
+        debug: Some(DebugInfo {
+            files: vec![debug_file(&[7])],
+        }),
+        ..minimal_root()
+    };
+    let empty = Irep {
+        debug: Some(DebugInfo { files: Vec::new() }),
+        ..minimal_root()
+    };
+    let root = Irep {
+        iseq: vec![0x00, 0x00, 0x00],
+        reps: vec![liney, empty],
+        debug: Some(DebugInfo {
+            files: vec![debug_file(&[4, 4, 9])],
+        }),
+        ..minimal_root()
+    };
+    let section = encode_debug_section(&root).expect("defined");
+    let mut expected = b"DBG\0".to_vec();
+    expected.extend_from_slice(&60u32.to_be_bytes());
+    expected.extend_from_slice(&1u16.to_be_bytes());
+    expected.extend_from_slice(&2u16.to_be_bytes());
+    expected.extend_from_slice(b"-e");
+    // Root record: packed `[4,4,9]` -> `[0,4,2,5]`.
+    expected.extend_from_slice(&21u32.to_be_bytes());
+    expected.extend_from_slice(&1u16.to_be_bytes());
+    expected.extend_from_slice(&0u32.to_be_bytes());
+    expected.extend_from_slice(&0u16.to_be_bytes());
+    expected.extend_from_slice(&4u32.to_be_bytes());
+    expected.push(2);
+    expected.extend_from_slice(&[0, 4, 2, 5]);
+    // Child record: packed `[7]` -> `[0,7]`.
+    expected.extend_from_slice(&19u32.to_be_bytes());
+    expected.extend_from_slice(&1u16.to_be_bytes());
+    expected.extend_from_slice(&0u32.to_be_bytes());
+    expected.extend_from_slice(&0u16.to_be_bytes());
+    expected.extend_from_slice(&2u32.to_be_bytes());
+    expected.push(2);
+    expected.extend_from_slice(&[0, 7]);
+    // Empty child: record with no files.
+    expected.extend_from_slice(&6u32.to_be_bytes());
+    expected.extend_from_slice(&0u16.to_be_bytes());
+    assert_eq!(section, expected);
+
+    let bytes = write_rite(&RiteModel {
+        root,
+        ..Default::default()
+    });
+    assert!(bytes.windows(section.len()).any(|window| window == section));
+    let irep_at = bytes.windows(4).position(|w| w == b"IREP").expect("IREP");
+    let dbg_at = bytes.windows(4).position(|w| w == b"DBG\0").expect("DBG");
+    let end_at = bytes.windows(4).position(|w| w == b"END\0").expect("END");
+    assert!(irep_at < dbg_at && dbg_at < end_at);
+}
+
+#[test]
+fn without_debug_drops_structured_and_raw() {
+    let model = RiteModel {
+        root: Irep {
+            debug: Some(DebugInfo {
+                files: vec![debug_file(&[1])],
+            }),
+            ..minimal_root()
+        },
+        ..Default::default()
+    };
+    let bytes = write_rite(&model);
+    assert!(bytes.windows(4).any(|window| window == b"DBG\0"));
+    let stripped = without_debug(&bytes).expect("strips");
+    assert!(!stripped.windows(4).any(|window| window == b"DBG\0"));
+    // Stripped output equals the same tree compiled without debug info.
+    let plain = RiteModel {
+        root: minimal_root(),
+        ..Default::default()
+    };
+    assert_eq!(stripped, write_rite(&plain));
+    // Structured output is stable through a raw round-trip.
+    let back = read_rite(&bytes).expect("parses");
+    assert!(back
+        .debug_raw
+        .as_ref()
+        .is_some_and(|raw| raw.starts_with(b"DBG\0")));
+    assert_eq!(write_rite(&back), bytes);
 }

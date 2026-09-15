@@ -247,6 +247,39 @@ fn finish_computes_counts_and_lvar() {
 }
 
 #[test]
+fn emitted_bytes_carry_the_active_line() {
+    let (mut session, mut scope) = new_scope();
+    scope.lineno = 3;
+    scope
+        .genop_1(&session, opcode::OP_LOADNIL, 0)
+        .expect("genop");
+    assert_eq!(&scope.lines[..scope.pc as usize], &[3, 3]);
+    scope.lineno = 5;
+    scope.genop_0(opcode::OP_STOP).expect("genop");
+    assert_eq!(&scope.lines[..scope.pc as usize], &[3, 3, 5]);
+    let irep = scope.finish(&mut session).expect("finish");
+    let files = &irep.debug.expect("debug info").files;
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].start_pos, 0);
+    assert_eq!(files[0].filename, b"-e");
+    assert_eq!(files[0].lines, vec![3, 3, 5]);
+}
+
+#[test]
+fn child_scopes_inherit_filename_and_line() {
+    let (mut session, mut scope) = new_scope();
+    scope.lineno = 7;
+    scope.filename = b"foo.rb".to_vec();
+    let child = Scope::child(&mut session, &scope, &[]).expect("child");
+    assert_eq!(child.lineno, 7);
+    assert_eq!(child.filename, b"foo.rb");
+    // An empty scope keeps its debug info but appends no file
+    // (`mrc_debug_info_append_file` returns `NULL` for an empty range).
+    let irep = child.finish(&mut session).expect("finish");
+    assert!(irep.debug.expect("debug info").files.is_empty());
+}
+
+#[test]
 fn move_fuses_addi_into_addilv() {
     let (mut session, mut scope) = new_scope();
     scope.nlocals = 1;
@@ -275,4 +308,24 @@ fn loop_pop_patches_break_chain() {
         .expect("load");
     scope.loop_pop(&session, false).expect("pop");
     assert!(scope.loops.is_empty());
+}
+
+#[test]
+fn jump_patches_keep_the_original_line() {
+    let (session, mut scope) = new_scope();
+    scope.lineno = 3;
+    let pos = scope
+        .genjmp2(&session, opcode::OP_JMPNOT, 1, u32::MAX, false)
+        .expect("jmp");
+    scope.lineno = 9;
+    scope
+        .genop_1(&session, opcode::OP_LOADNIL, 1)
+        .expect("load");
+    scope.dispatch(pos).expect("patch");
+    // Patched offset bytes keep line 3; the LOADNIL carries line 9.
+    assert_eq!(&scope.lines[..scope.pc as usize], &[3, 3, 3, 3, 9, 9]);
+    // Same for the alternation-style `u16` overwrite.
+    scope.lineno = 11;
+    scope.emit_s(2, 0).expect("poke");
+    assert_eq!(&scope.lines[..scope.pc as usize], &[3, 3, 3, 3, 9, 9]);
 }

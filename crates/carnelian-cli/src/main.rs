@@ -48,8 +48,8 @@ enum Command {
         #[arg(short, long)]
         output: PathBuf,
     },
-    /// Compare `compile` against `reference`, byte for byte, in both strip
-    /// modes (both must match the same flags-`0` golden).
+    /// Compare `compile` against `reference` in both strip modes, ignoring
+    /// `DBG` bytes (the reference dumps with flags `0`).
     #[cfg(feature = "reference")]
     Verify {
         /// Source file (`-` reads stdin).
@@ -185,7 +185,7 @@ fn compile_source(
             if !errors.is_empty() {
                 return Err(parse_errors_text(&errors));
             }
-            carnelian_compiler::compile_tree(parsed.root(), opts)
+            carnelian_compiler::compile_tree_with_source(parsed.root(), opts, source.as_bytes())
                 .map_err(|diagnostics| format!("{diagnostics}"))
         }
         #[cfg(feature = "prism")]
@@ -200,7 +200,7 @@ fn compile_source(
                 node: &node,
                 pool: &pool,
             };
-            carnelian_compiler::compile_tree(owned, opts)
+            carnelian_compiler::compile_tree_with_source(owned, opts, source.as_bytes())
                 .map_err(|diagnostics| format!("{diagnostics}"))
         }
         "mri" => {
@@ -235,7 +235,15 @@ fn cmd_verify(input: &PathBuf, frontend: &str) -> i32 {
             return 1;
         }
     };
-    // Both modes must match the same flags-`0` golden (see agents/progress.md).
+    // The reference dumps with flags `0` (no `DBG`); comparison ignores
+    // debug bytes on both sides until it emits them.
+    let reference = match carnelian_compiler::without_debug(&reference) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            eprintln!("error: cannot strip reference debug: {err}");
+            return 1;
+        }
+    };
     for stripped in [false, true] {
         let opts = carnelian_compiler::CompileOptions {
             stripped,
@@ -245,6 +253,13 @@ fn cmd_verify(input: &PathBuf, frontend: &str) -> i32 {
             Ok(bytes) => bytes,
             Err(text) => {
                 eprint!("{text}");
+                return 1;
+            }
+        };
+        let compiled = match carnelian_compiler::without_debug(&compiled) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                eprintln!("error: cannot strip compiled debug: {err}");
                 return 1;
             }
         };

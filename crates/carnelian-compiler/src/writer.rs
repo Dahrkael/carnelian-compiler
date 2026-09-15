@@ -179,7 +179,11 @@ fn write_lv_records(out: &mut Vec<u8>, irep: &Irep) {
 #[must_use]
 pub fn write_rite(model: &RiteModel) -> Vec<u8> {
     let irep_section_size = 12 + irep_record_size(&model.root);
-    let debug_size = model.debug_raw.as_ref().map_or(0, Vec::len);
+    // Structured debug (codegen) takes the `dump.c` encode path; otherwise
+    // preserved raw bytes go out verbatim (reader round-trips).
+    let debug_built = crate::debug::encode_debug_section(&model.root);
+    let debug_bytes = debug_built.as_deref().or(model.debug_raw.as_deref());
+    let debug_size = debug_bytes.map_or(0, <[u8]>::len);
     let lvar_size = model.lvar_syms.as_ref().map_or(0, |syms| {
         8 + 4 + syms.iter().map(|name| 2 + name.len()).sum::<usize>() + lv_records_size(&model.root)
     });
@@ -200,7 +204,7 @@ pub fn write_rite(model: &RiteModel) -> Vec<u8> {
     write_irep_record(&mut out, &model.root);
 
     // `dump.c` order is IREP, DEBUG, LVAR, END.
-    if let Some(raw) = &model.debug_raw {
+    if let Some(raw) = debug_bytes {
         debug_assert!(raw.starts_with(DEBUG_IDENT));
         out.extend_from_slice(raw);
     }

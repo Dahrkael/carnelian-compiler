@@ -294,6 +294,9 @@ fn read_irep_record(input: &mut &[u8]) -> Result<Irep, ReadError> {
         syms,
         reps,
         lv: Vec::new(),
+        // Structured debug is codegen-only; the reader preserves `DBG` as
+        // raw bytes (`debug_raw`) for verbatim re-emission.
+        debug: None,
     })
 }
 

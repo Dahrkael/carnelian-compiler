@@ -35,6 +35,25 @@ pub struct CatchHandler {
     pub target: u32,
 }
 
+/// One debug file entry (`mrc_irep_debug_info_file`, packed-map form only).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DebugFile {
+    /// First pc covered (`start_pos`).
+    pub start_pos: u32,
+    /// Filename bytes (no NUL).
+    pub filename: Vec<u8>,
+    /// Per-pc lines for `[start_pos, start_pos + lines.len())`.
+    pub lines: Vec<u16>,
+}
+
+/// Per-irep debug info (`mrc_irep_debug_info`); `None` on `Irep` means the
+/// scope carried none (like a `NULL debug_info` in C).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DebugInfo {
+    /// File entries in order.
+    pub files: Vec<DebugFile>,
+}
+
 /// One irep record with its child ireps.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Irep {
@@ -55,6 +74,9 @@ pub struct Irep {
     /// Local names as LVAR symbol-table indices (`None` = `0xFFFF`).
     /// Empty when the binary carries no `LVAR` section.
     pub lv: Vec<Option<u32>>,
+    /// Structured debug info; encoded to `DBG` by the writer. `None` emits
+    /// no record (the reader never fills this: it preserves `debug_raw`).
+    pub debug: Option<DebugInfo>,
 }
 
 /// Full RITE image for the writer.

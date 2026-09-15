@@ -1,6 +1,6 @@
 //! P4 parity (MRI frontend): `reference` == `compile --frontend prism` ==
 //! `compile --frontend owned` == `compile --frontend mri` for the shared
-//! corpus, in both strip modes. Needs sibling A (lower), B (scopes) and the
+//! corpus, ignoring `DBG` bytes, in both strip modes. Needs sibling A (lower), B (scopes) and the
 //! end-to-end `compile`; until those land every `mri` comparison fails.
 //!
 //! Grammar-ceiling gates (`it`, anonymous 3.2 forwarding) fail under `mri`
@@ -36,6 +36,13 @@ fn first_divergence(a: &[u8], b: &[u8]) -> Option<usize> {
         return Some(a.len().min(b.len()));
     }
     None
+}
+
+/// Bytes with the `DBG` section removed (parity ignores debug info until
+/// the pinned reference emits it).
+#[cfg(all(feature = "reference", feature = "prism"))]
+fn stripped(bytes: &[u8]) -> Vec<u8> {
+    carnelian_compiler::without_debug(bytes).expect("strip debug")
 }
 
 #[cfg(all(feature = "reference", feature = "prism"))]
@@ -123,19 +130,19 @@ fn mri_excluded(origin: &str, name: &str) -> bool {
 fn check_parity_4way(origin: &str, name: &str, source: &str) {
     let scoped = format!("{origin}_{name}");
     let dir = tempfile::tempdir().expect("tempdir");
-    let golden = reference_bytes(&scoped, source, dir.path());
+    let golden = stripped(&reference_bytes(&scoped, source, dir.path()));
     for strip in [false, true] {
-        let prism = compile_bytes(&scoped, source, dir.path(), strip, "prism");
+        let prism = stripped(&compile_bytes(&scoped, source, dir.path(), strip, "prism"));
         assert!(
             first_divergence(&golden, &prism).is_none(),
             "{scoped} (prism, strip={strip}): bytes diverge"
         );
-        let owned = compile_bytes(&scoped, source, dir.path(), strip, "owned");
+        let owned = stripped(&compile_bytes(&scoped, source, dir.path(), strip, "owned"));
         assert!(
             first_divergence(&golden, &owned).is_none(),
             "{scoped} (owned, strip={strip}): bytes diverge"
         );
-        let mri = compile_bytes(&scoped, source, dir.path(), strip, "mri");
+        let mri = stripped(&compile_bytes(&scoped, source, dir.path(), strip, "mri"));
         assert!(
             first_divergence(&golden, &mri).is_none(),
             "{scoped} (mri, strip={strip}): bytes diverge"
@@ -317,7 +324,7 @@ fn mri_scope_vectors() {
 }
 
 // Host smoke for the shipping path: `front_mri::compile` on `puts 1`
-// must emit the pinned golden (same bytes as the p3 `puts 1` fixture).
+// must emit the pinned golden ignoring `DBG` (same IREP as the p3 fixture).
 const EXPECTED_PUTS1_MRB: &[u8] = &[
     0x52, 0x49, 0x54, 0x45, 0x30, 0x34, 0x30, 0x30, 0x00, 0x00, 0x00, 0x4c, 0x48, 0x53, 0x4d, 0x4b,
     0x30, 0x30, 0x30, 0x30, 0x49, 0x52, 0x45, 0x50, 0x00, 0x00, 0x00, 0x30, 0x30, 0x34, 0x30, 0x30,
@@ -333,5 +340,8 @@ fn mri_host_smoke_puts1_matches_golden() {
         filename: None,
     };
     let bytes = carnelian_front_mri::compile("puts 1\n", &opts).expect("mri smoke compiles");
-    assert_eq!(bytes, EXPECTED_PUTS1_MRB);
+    assert_eq!(
+        carnelian_compiler::without_debug(&bytes).expect("smoke strips"),
+        EXPECTED_PUTS1_MRB
+    );
 }
