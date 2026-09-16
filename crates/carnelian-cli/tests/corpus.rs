@@ -774,6 +774,30 @@ pub const P26_SNIPPETS: &[(&str, &str)] = &[
         "case_in_range",
         "x = 2\ncase x\nin 1..3 then puts 1\nelse puts 2\nend\n",
     ),
+    (
+        "case_in_regexp",
+        "x = \"ab\"\ncase x\nin /a/ then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_iregexp",
+        "x = \"a1\"\ncase x\nin /a#{1}/ then puts 1\nelse puts 2\nend\n",
+    ),
+    ("regexp_basic", "puts /a/\n"),
+    ("regexp_flags", "puts /a/im\n"),
+    ("regexp_encoding", "puts /a/n\n"),
+    ("regexp_interp", "puts /a#{1}/\n"),
+    ("regexp_interp_flags", "puts /a#{1}/im\n"),
+    ("regexp_interp_leading", "puts /#{1}a/\n"),
+    ("regexp_noval", "/a/\nputs 1\n"),
+    ("regexp_interp_noval", "/a#{1}/\nputs 1\n"),
+    (
+        "match_write",
+        "x = \"ab\"\nif /(?<c>a)/ =~ x then puts c\nend\nputs 2\n",
+    ),
+    (
+        "match_write_noval",
+        "x = \"ab\"\n/(?<c>a)/ =~ x\nputs 2\n",
+    ),
     ("case_in_alt", "x = 2\ncase x\nin 1 | 2 then puts 1\nelse puts 2\nend\n"),
     (
         "case_in_alt_chain",
@@ -1049,6 +1073,15 @@ pub const P26_SNIPPETS: &[(&str, &str)] = &[
     ("backref_match_var", "puts $~\n"),
     ("backref_assign", "x = $&\nputs x\n"),
     ("backref_large_number", "puts $99999999999\n"),
+    ("xstr_plain_valued", "x = `echo hi`\nputs 1\n"),
+    ("xstr_plain_noval", "`echo hi`\nputs 1\n"),
+    ("xstr_interp_valued", "x = 1\ny = `hi #{x}`\nputs 1\n"),
+    ("xstr_interp_noval", "x = 1\n`hi #{x}`\nputs 1\n"),
+    ("xstr_interp_leading", "x = 1\n`#{x} hi`\nputs 1\n"),
+    (
+        "case_in_xstr",
+        "x = 1\ncase x\nin `foo` then puts 1\nelse puts 2\nend\n",
+    ),
     // Magic constants (`__FILE__` bakes the compile filename, `__LINE__`
     // the node's source line, `__ENCODING__` a zero-argument send).
     ("magic_file", "puts __FILE__\n"),
@@ -1071,29 +1104,9 @@ pub const P26_SNIPPETS: &[(&str, &str)] = &[
 /// `GATED` table from `p26_specials.rs`.
 pub const P26_GATED: &[(&str, &str, &str)] = &[
     (
-        "case_in_regexp_gated",
-        "x = \"ab\"\ncase x\nin /a/ then puts 1\nelse puts 2\nend\n",
-        "RegularExpressionNode",
-    ),
-    (
-        "case_in_xstr_gated",
-        "x = 1\ncase x\nin `foo` then puts 1\nelse puts 2\nend\n",
-        "XStringNode",
-    ),
-    (
-        "case_in_iregexp_gated",
-        "x = \"a1\"\ncase x\nin /a#{1}/ then puts 1\nelse puts 2\nend\n",
-        "InterpolatedRegularExpressionNode",
-    ),
-    (
         "case_in_alt_capture_gated",
         "x = 1\ncase x\nin (Integer => n) | (String => n) then puts n\nelse puts 2\nend\n",
         "variable capture in alternative pattern",
-    ),
-    (
-        "match_write_gated",
-        "x = \"ab\"\nif /(?<c>a)/ =~ x then puts c\nend\nputs 2\n",
-        "RegularExpressionNode",
     ),
     (
         "preexec_gated",

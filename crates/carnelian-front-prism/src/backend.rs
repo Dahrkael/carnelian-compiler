@@ -4,10 +4,11 @@ use carnelian_ast::view::{
     AlternationView, ArrayPatternView, BackendNode, BeginView, BlockParamView, BlockView,
     CallTargetView, CallView, CallWriteView, CaptureView, CaseMatchView, CaseView, ClassView,
     ConstPathRead, ConstPathWrite, DefView, EnsureView, FindPatternView, ForView, GuardView,
-    HashPatternView, IfView, InView, IndexTargetView, IndexWriteView, IntegerLit, KeywordParamView,
-    LambdaView, LogicWriteView, LvarRef, LvarWrite, MatchView, ModuleView, MultiTargetView,
-    MultiWriteView, OpWriteView, ParamsView, ProgramView, RangeView, RescueModifierView,
-    RescueView, SclassView, SimpleLit, SuperView, VarWrite, WhenView, WhileView, YieldView,
+    HashPatternView, IfView, InView, IndexTargetView, IndexWriteView, IntegerLit, InterpRegexpView,
+    KeywordParamView, LambdaView, LogicWriteView, LvarRef, LvarWrite, MatchView, ModuleView,
+    MultiTargetView, MultiWriteView, OpWriteView, ParamsView, ProgramView, RangeView, RegexpView,
+    RescueModifierView, RescueView, SclassView, SimpleLit, SuperView, VarWrite, WhenView,
+    WhileView, YieldView,
 };
 use carnelian_ast::AstNode;
 use carnelian_ast::{limbs_to_decimal, NIL_BLOCK};
@@ -420,6 +421,33 @@ impl BackendNode for PrismNode<'_> {
     fn interp_symbol(&self) -> Option<Vec<Self>> {
         let node = self.inner.as_interpolated_symbol_node()?;
         Some(wrap_many(node.parts()))
+    }
+
+    fn xstring(&self) -> Option<Vec<u8>> {
+        self.inner
+            .as_x_string_node()
+            .map(|node| node.unescaped().to_vec())
+    }
+
+    fn interp_xstring(&self) -> Option<Vec<Self>> {
+        let node = self.inner.as_interpolated_x_string_node()?;
+        Some(wrap_many(node.parts()))
+    }
+
+    fn regexp(&self) -> Option<RegexpView> {
+        let node = self.inner.as_regular_expression_node()?;
+        Some(RegexpView {
+            unescaped: node.unescaped().to_vec(),
+            flags: node.flags(),
+        })
+    }
+
+    fn interp_regexp(&self) -> Option<InterpRegexpView<Self>> {
+        let node = self.inner.as_interpolated_regular_expression_node()?;
+        Some(InterpRegexpView {
+            parts: wrap_many(node.parts()),
+            flags: node.flags(),
+        })
     }
 
     fn embedded_body(&self) -> Option<Vec<Self>> {

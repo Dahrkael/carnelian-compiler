@@ -247,6 +247,27 @@ pub struct RangeView<N> {
     pub exclude_end: bool,
 }
 
+/// Regexp literal parts (`RegularExpressionNode`): the source bytes plus
+/// the raw flags word. Node-specific bits share the word with the generic
+/// `NEWLINE`/`STATIC_LITERAL` bits, so the backend masks them like
+/// `RangeView::exclude_end` does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegexpView {
+    /// Pattern source bytes (unescaped).
+    pub unescaped: Vec<u8>,
+    /// Raw Prism flags word.
+    pub flags: u16,
+}
+
+/// Interpolated regexp parts (`InterpolatedRegularExpressionNode`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterpRegexpView<N> {
+    /// String and embedded parts in order.
+    pub parts: Vec<N>,
+    /// Raw Prism flags word.
+    pub flags: u16,
+}
+
 /// Program parts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgramView<N> {
@@ -766,6 +787,27 @@ pub trait BackendNode: AstNode + Clone + Sized {
 
     /// Interpolated symbol parts (`InterpolatedSymbolNode`).
     fn interp_symbol(&self) -> Option<Vec<Self>> {
+        None
+    }
+
+    /// Backtick literal bytes (`XStringNode`, unescaped).
+    fn xstring(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Interpolated backtick parts (`InterpolatedXStringNode`).
+    fn interp_xstring(&self) -> Option<Vec<Self>> {
+        None
+    }
+
+    /// Regexp literal source and flags (`RegularExpressionNode`).
+    fn regexp(&self) -> Option<RegexpView> {
+        None
+    }
+
+    /// Interpolated regexp parts and flags
+    /// (`InterpolatedRegularExpressionNode`).
+    fn interp_regexp(&self) -> Option<InterpRegexpView<Self>> {
         None
     }
 

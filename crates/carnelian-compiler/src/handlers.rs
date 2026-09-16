@@ -3,6 +3,7 @@
 //! Dispatch is on `kind_name` (1:1 with the C `switch` on node type); values
 //! travel through `BackendNode`, so FFI and owned frontends share handlers.
 
+use carnelian_ast::regular_expression_flags;
 use carnelian_ast::view::{
     BackendNode, CallView, CallWriteView, IndexWriteView, IntegerLit, SimpleLit,
 };
@@ -461,6 +462,8 @@ fn codegen_dispatch<N: BackendNode>(
         "ImaginaryNode" => gen_imaginary(cg, node, val),
         "StringNode" => gen_string(cg, node, val),
         "SymbolNode" => gen_symbol(cg, node, val),
+        "RegularExpressionNode" => gen_regexp(cg, node, val),
+        "InterpolatedRegularExpressionNode" => gen_interp_regexp(cg, node, val),
         "SourceFileNode" => gen_source_file(cg, node, val),
         "SourceLineNode" => gen_source_line(cg, node, val),
         "SourceEncodingNode" => gen_source_encoding(cg, node, val),
@@ -473,6 +476,8 @@ fn codegen_dispatch<N: BackendNode>(
         "MatchPredicateNode" => gen_match_predicate(cg, node, val),
         "MatchRequiredNode" => gen_match_required(cg, node, val),
         "InterpolatedStringNode" => gen_interp_string(cg, node, val),
+        "XStringNode" => gen_xstring(cg, node, val),
+        "InterpolatedXStringNode" => gen_interp_xstring(cg, node, val),
         "InterpolatedSymbolNode" => gen_interp_symbol(cg, node, val),
         "EmbeddedStatementsNode" => gen_branch(cg, node.embedded_body(), val),
         "EmbeddedVariableNode" => {
@@ -854,6 +859,324 @@ fn gen_interp_string<N: BackendNode>(
         return Err(unsupported(&node, "empty interpolated string"));
     }
     gen_interp_loop(cg, parts, val)
+}
+
+/// Option and encoding strings for a regexp flags word
+/// (`regex_set_flags`): `i`/`x`/`m` in that order, then one encoding byte
+/// (`e` for EUC_JP, `n` for ASCII_8BIT, `s` for WINDOWS_31J, `u` for
+/// UTF_8). `o` (once-only) is ignored like in C (mruby lacks it), as are
+/// the internal forced-encoding bits.
+fn regexp_flag_strings(flags: u16) -> (Vec<u8>, Vec<u8>) {
+    let mut opt = Vec::new();
+    if flags & regular_expression_flags::IGNORE_CASE != 0 {
+        opt.push(b'i');
+    }
+    if flags & regular_expression_flags::EXTENDED != 0 {
+        opt.push(b'x');
+    }
+    if flags & regular_expression_flags::MULTI_LINE != 0 {
+        opt.push(b'm');
+    }
+    let mut enc = Vec::new();
+    if flags & regular_expression_flags::EUC_JP != 0 {
+        enc.push(b'e');
+    } else if flags & regular_expression_flags::ASCII_8BIT != 0 {
+        enc.push(b'n');
+    } else if flags & regular_expression_flags::WINDOWS_31J != 0 {
+        enc.push(b's');
+    } else if flags & regular_expression_flags::UTF_8 != 0 {
+        enc.push(b'u');
+    }
+    (opt, enc)
+}
+
+/// Regexp literal (`PM_REGULAR_EXPRESSION_NODE`): `Regexp.compile` of the
+/// source with optional option/encoding strings, built from the `OCLASS`
+/// outer object plus `GETMCNST`. A lone encoding still takes two arguments
+/// (a `LOADNIL` option placeholder), like in C.
+fn gen_regexp<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    if !val {
+        return Ok(());
+    }
+    let Some(view) = node.regexp() else {
+        return Err(unsupported(&node, "regexp literal"));
+    };
+    let (opt, enc) = regexp_flag_strings(view.flags);
+    // `Regexp` interns before the source string, `compile` after the
+    // option/encoding strings (pool order matters for byte-identity).
+    let sym_regexp = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, b"Regexp")?
+    };
+    let off_source = {
+        let (session, scope) = cg.current();
+        scope.new_lit_str(session, &view.unescaped)? as u16
+    };
+    let mut argc: u8 = 1;
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_1(session, opcode::OP_OCLASS, dst)?;
+    }
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_GETMCNST, dst, sym_regexp)?;
+    }
+    cg.current().1.push_n(1)?;
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_STRING, dst, off_source)?;
+    }
+    cg.current().1.push_n(1)?;
+    if !opt.is_empty() || !enc.is_empty() {
+        if !opt.is_empty() {
+            let off = {
+                let (session, scope) = cg.current();
+                scope.new_lit_str(session, &opt)? as u16
+            };
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_2(session, opcode::OP_STRING, dst, off)?;
+        } else {
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_1(session, opcode::OP_LOADNIL, dst)?;
+        }
+        cg.current().1.push_n(1)?;
+        argc += 1;
+        if !enc.is_empty() {
+            let off = {
+                let (session, scope) = cg.current();
+                scope.new_lit_str(session, &enc)? as u16
+            };
+            let (session, scope) = cg.current();
+            let dst = scope.cursp();
+            scope.genop_2(session, opcode::OP_STRING, dst, off)?;
+            cg.current().1.push_n(1)?;
+            argc += 1;
+        }
+    }
+    // Space for a block, then the `compile` send over `argc + 2` slots.
+    cg.current().1.push_n(1)?;
+    cg.current().1.pop_n(u16::from(argc) + 2)?;
+    let sym_compile = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, b"compile")?
+    };
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_3(session, opcode::OP_SEND, dst, sym_compile, argc)?;
+    }
+    cg.current().1.push_n(1)?;
+    Ok(())
+}
+
+/// Interpolated regexp (`PM_INTERPOLATED_REGULAR_EXPRESSION_NODE`): the
+/// `Regexp` prologue, an empty-string base unless the first part is already
+/// a string (so `STRCAT` never mutates a shared literal), per-part `VAL`
+/// plus `STRCAT`, then the option/encoding strings, the block slot and the
+/// `compile` send. Unlike the plain literal there is no `LOADNIL`
+/// placeholder when only the encoding is present, like in C. `NOVAL` only
+/// codes side effects of the non-string parts.
+fn gen_interp_regexp<N: BackendNode>(
+    cg: &mut Codegen,
+    node: N,
+    val: bool,
+) -> Result<(), Diagnostic> {
+    let Some(view) = node.interp_regexp() else {
+        return Err(unsupported(&node, "interpolated regexp"));
+    };
+    if !val {
+        for part in view.parts {
+            if part.kind_name() != "StringNode" {
+                codegen(cg, part, false)?;
+            }
+        }
+        return Ok(());
+    }
+    let str_begin = match view.parts.first() {
+        Some(first) => first.kind_name() != "StringNode",
+        None => return Err(unsupported(&node, "empty interpolated regexp")),
+    };
+    let sym_regexp = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, b"Regexp")?
+    };
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_1(session, opcode::OP_OCLASS, dst)?;
+    }
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_GETMCNST, dst, sym_regexp)?;
+    }
+    cg.current().1.push_n(1)?;
+    if str_begin {
+        let off = {
+            let (session, scope) = cg.current();
+            scope.new_lit_str(session, b"")? as u16
+        };
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_STRING, dst, off)?;
+        cg.current().1.push_n(1)?;
+    }
+    for (index, part) in view.parts.into_iter().enumerate() {
+        codegen(cg, part, true)?;
+        cg.current().1.pop_n(1)?;
+        if str_begin || index > 0 {
+            let (session, scope) = cg.current();
+            scope.pop_n(1)?;
+            let dst = scope.cursp();
+            scope.genop_1(session, opcode::OP_STRCAT, dst)?;
+        }
+        cg.current().1.push_n(1)?;
+    }
+    let (opt, enc) = regexp_flag_strings(view.flags);
+    let mut argc: u8 = 1;
+    if !opt.is_empty() {
+        let off = {
+            let (session, scope) = cg.current();
+            scope.new_lit_str(session, &opt)? as u16
+        };
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_STRING, dst, off)?;
+        cg.current().1.push_n(1)?;
+        argc += 1;
+    }
+    if !enc.is_empty() {
+        let off = {
+            let (session, scope) = cg.current();
+            scope.new_lit_str(session, &enc)? as u16
+        };
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_STRING, dst, off)?;
+        cg.current().1.push_n(1)?;
+        argc += 1;
+    }
+    cg.current().1.push_n(1)?;
+    cg.current().1.pop_n(u16::from(argc) + 2)?;
+    let sym_compile = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, b"compile")?
+    };
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_3(session, opcode::OP_SEND, dst, sym_compile, argc)?;
+    }
+    cg.current().1.push_n(1)?;
+    Ok(())
+}
+
+/// Backtick literal (`PM_X_STRING_NODE`): the string as receiver argument
+/// to a private `` ` `` send on `self` (block slot reserved like a call).
+fn gen_xstring<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    let Some(bytes) = node.xstring() else {
+        return Err(unsupported(&node, "xstring literal"));
+    };
+    // C order: `new_lit_str` then `new_sym(tick)`.
+    let index = {
+        let (session, scope) = cg.current();
+        scope.new_lit_str(session, &bytes)? as u16
+    };
+    let sym = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, b"`")?
+    };
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_1(session, opcode::OP_LOADSELF, dst)?;
+        scope.push_n(1)?;
+    }
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_2(session, opcode::OP_STRING, dst, index)?;
+        scope.push_n(1)?;
+        scope.push_n(1)?;
+        scope.pop_n(3)?;
+    }
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_3(session, opcode::OP_SSEND, dst, sym, 1)?;
+    }
+    if val {
+        cg.current().1.push_n(1)?;
+    }
+    Ok(())
+}
+
+/// Interpolated backtick (`PM_INTERPOLATED_X_STRING_NODE`): `LOADSELF`,
+/// the `gen_interp_string` concatenation shape (always valued, even for
+/// `NOVAL` like C), then the `` ` `` send with its block slot.
+fn gen_interp_xstring<N: BackendNode>(
+    cg: &mut Codegen,
+    node: N,
+    val: bool,
+) -> Result<(), Diagnostic> {
+    let Some(parts) = node.interp_xstring() else {
+        return Err(unsupported(&node, "interpolated xstring"));
+    };
+    let Some(first) = parts.first() else {
+        return Err(unsupported(&node, "empty interpolated xstring"));
+    };
+    // C interns `Kernel` before the concatenation, then overwrites `sym`
+    // with the backtick name; keep the call for table order.
+    {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, b"Kernel")?;
+    }
+    let str_begin = first.kind_name() != "StringNode";
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_1(session, opcode::OP_LOADSELF, dst)?;
+        scope.push_n(1)?;
+    }
+    if str_begin {
+        let (session, scope) = cg.current();
+        let index = scope.new_lit_str(session, b"")? as u16;
+        emit_load2(cg, opcode::OP_STRING, index)?;
+    }
+    for (index, part) in parts.into_iter().enumerate() {
+        codegen(cg, part, true)?;
+        cg.current().1.pop_n(1)?;
+        if str_begin || index > 0 {
+            let (session, scope) = cg.current();
+            scope.pop_n(1)?;
+            let dst = scope.cursp();
+            scope.genop_1(session, opcode::OP_STRCAT, dst)?;
+        }
+        cg.current().1.push_n(1)?;
+    }
+    {
+        let (_, scope) = cg.current();
+        scope.push_n(1)?;
+        scope.pop_n(3)?;
+    }
+    let sym = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, b"`")?
+    };
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.genop_3(session, opcode::OP_SSEND, dst, sym, 1)?;
+    }
+    if val {
+        cg.current().1.push_n(1)?;
+    }
+    Ok(())
 }
 
 /// Interpolated symbol (`PM_INTERPOLATED_SYMBOL_NODE`): the shared loop,

@@ -163,7 +163,6 @@ fn mri_marker<'a>(origin: &str, name: &str, marker: &'a str) -> &'a str {
     match (origin, name) {
         ("p23", "yield_naked") | ("p23", "yield_args") => "invalid yield",
         ("p26", "case_in_alt_capture_gated") => "duplicated variable name",
-        ("p26", "match_write_gated") => "RegularExpressionNode",
         _ => marker,
     }
 }

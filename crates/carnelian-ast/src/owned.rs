@@ -7,10 +7,11 @@ use crate::view::{
     AlternationView, ArrayPatternView, BackendNode, BeginView, BlockParamView, BlockView,
     CallTargetView, CallView, CallWriteView, CaptureView, CaseMatchView, CaseView, ClassView,
     ConstPathRead, ConstPathWrite, DefView, EnsureView, FindPatternView, ForView, GuardView,
-    HashPatternView, IfView, InView, IndexTargetView, IndexWriteView, IntegerLit, KeywordParamView,
-    LambdaView, LogicWriteView, LvarRef, LvarWrite, MatchView, ModuleView, MultiTargetView,
-    MultiWriteView, OpWriteView, ParamsView, ProgramView, RangeView, RescueModifierView,
-    RescueView, SclassView, SimpleLit, SuperView, VarWrite, WhenView, WhileView, YieldView,
+    HashPatternView, IfView, InView, IndexTargetView, IndexWriteView, IntegerLit, InterpRegexpView,
+    KeywordParamView, LambdaView, LogicWriteView, LvarRef, LvarWrite, MatchView, ModuleView,
+    MultiTargetView, MultiWriteView, OpWriteView, ParamsView, ProgramView, RangeView, RegexpView,
+    RescueModifierView, RescueView, SclassView, SimpleLit, SuperView, VarWrite, WhenView,
+    WhileView, YieldView,
 };
 use crate::{
     arguments_node_flags, call_node_flags, loop_flags, range_flags, AstNode, Integer, Node, Span,
@@ -606,6 +607,44 @@ impl BackendNode for Owned<'_> {
     fn interp_symbol(&self) -> Option<Vec<Self>> {
         match &self.node {
             Node::InterpolatedSymbolNode { parts, .. } => Some(self.vec_children(parts)),
+            _ => None,
+        }
+    }
+
+    fn xstring(&self) -> Option<Vec<u8>> {
+        match &self.node {
+            Node::XStringNode { unescaped, .. } => Some(unescaped.clone()),
+            _ => None,
+        }
+    }
+
+    fn interp_xstring(&self) -> Option<Vec<Self>> {
+        match &self.node {
+            Node::InterpolatedXStringNode { parts, .. } => Some(self.vec_children(parts)),
+            _ => None,
+        }
+    }
+
+    fn regexp(&self) -> Option<RegexpView> {
+        match &self.node {
+            Node::RegularExpressionNode {
+                unescaped, flags, ..
+            } => Some(RegexpView {
+                unescaped: unescaped.clone(),
+                flags: *flags,
+            }),
+            _ => None,
+        }
+    }
+
+    fn interp_regexp(&self) -> Option<InterpRegexpView<Self>> {
+        match &self.node {
+            Node::InterpolatedRegularExpressionNode { parts, flags, .. } => {
+                Some(InterpRegexpView {
+                    parts: self.vec_children(parts),
+                    flags: *flags,
+                })
+            }
             _ => None,
         }
     }
