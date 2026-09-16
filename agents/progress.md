@@ -680,3 +680,44 @@ correctly by construction of byte-identity).
 - DBG note from the client (23 files differ, line numbers correct) needs
   no action: the reference dumps with flags 0 (no `DBG` section at all);
   our `verify` ignores `DBG` by design until the reference emits it.
+
+## Real-world corpus tranche (`feature/real-corpus`, 264 files / 1056 rows)
+
+`tools/fetch_corpus.sh` pins mruby 3.4.0 + picoruby 3.4.5 into gitignored
+`.corpus/` (no vendoring); `carnelian corpus --frontends all` certifies
+every file on mri+prism × stripped/unstripped against the pinned
+reference. Status: **1052 identical, 0 ref_reject, 4 our_gate
+(`bs_block.rb` nested splat params, structural), 0 diverge**.
+`corpus/baseline.tsv` + `--check` (+ `tests/corpus_files.rs`) lock it;
+`corpus/README.md`, `agents/corpus-findings.md` hold policy and roots.
+
+Fixed (all byte-certified, reference-probed): `super(*a)` splat via
+`gen_values` (views only vetoed it); `super(){}`/`super(&block)` via a
+`SuperView.block` codegen (`OP_BLOCK`/block-arg read, taken even with
+`arguments: None` which C never sees); `super(k: v)` via
+`split_keywords` + `gen_hash` (`n |= nk<<4`, same as `gen_yield`);
+`def t(foo = foo)` demoted to warning (reference compiles it);
+MRI `Numblock.numargs` → `maximum` + `Numblock{call: Lambda}` arm
+(`-> { _1 }` gave `REQ(max)` + `R1` reads for free); nested-heredoc
+resumption split (`y\nmm1\n` → `y\n`+`mm1\n` past heredoc-bearing
+interpolations only); `<<~` mixed/backslash indent rebuilt from source
+with the Prism tab-aware widths (tab → next ×8, overshoot break,
+`common == 0` skips dedent), unescape-before-strip, continuation bail.
+Lock-ins: `super_splat` moved GATED → SNIPPETS, `super_view` + numblock
+unit tests updated to the open behavior.
+
+## Review verdicts (corpus tranche, reviewer subagent)
+
+Accepted and fixed: span-carve clamp in `split_nested_resumption`,
+`u32::try_from` Span carves, `HeredocScan` docs glued onto
+`fix_heredoc_gaps` (reordered), `tab_advance` helper, `&line[..CAP]`
+char-boundary cut, unconditional frontend dedup, `corpus_files` assert
+includes stdout, `check_op_names` hard asserts (was `debug_assert`-only).
+Rejected with evidence: first-`\n`-only split (2-line follower probe
+gives 2 parts, not per-line); `common == 0` early-`None` (v2 IS the
+zero-common case and needs the redo); Prism circular demotion (prism
+`circ.rb` already identical); `count |= nk<<4` (mirrors C loop
+verbatim); multi-part `fix_heredoc_gaps` unescape threading (pre-existing,
+corpus green). Deferred, no evidence: `ForwardingArgumentsNode` in
+`super` args, `**x` shape in `split_keywords`, adjacent-piece comment
+drift (pre-existing).
