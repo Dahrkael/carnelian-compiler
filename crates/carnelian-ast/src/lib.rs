@@ -100,6 +100,10 @@ pub fn limbs_to_decimal(limbs: &[u32]) -> Vec<u8> {
 pub struct SymbolPool {
     names: Vec<Vec<u8>>,
     index: BTreeMap<Vec<u8>, u32>,
+    /// Source text under lowering, for span-based re-lexing done by
+    /// frontends (e.g. splitting adjacent string literals that a parser
+    /// folded). Absent unless a lowering entry point installs it.
+    source: Option<Vec<u8>>,
 }
 
 impl SymbolPool {
@@ -107,6 +111,17 @@ impl SymbolPool {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Install the source text being lowered (copied once per compile).
+    pub fn set_source(&mut self, bytes: &[u8]) {
+        self.source = Some(bytes.to_vec());
+    }
+
+    /// Lowering source text, if installed.
+    #[must_use]
+    pub fn source(&self) -> Option<&[u8]> {
+        self.source.as_deref()
     }
 
     /// Intern `name`, returning its stable ID.

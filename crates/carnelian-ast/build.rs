@@ -167,6 +167,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     out.push_str("}\n");
 
+    // Universe of node kind names, for corpus coverage reports.
+    out.push_str("\n/// Every node kind name from the Prism config snapshot.\n");
+    out.push_str("pub const ALL_NODE_KINDS: &[&str] = &[\n");
+    for node in &config.nodes {
+        out.push_str(&format!("    \"{}\",\n", node.name));
+    }
+    out.push_str("];\n");
+
     // Kind name + span + flags accessors (thin access core for the backend).
     out.push_str("\nimpl Node {\n");
     out.push_str("    /// Prism node kind name, 1:1 with `config.json`.\n");
