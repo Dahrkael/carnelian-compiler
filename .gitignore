@@ -10,6 +10,10 @@
 /bin/
 /dist/
 
+# Fetched real-world Ruby corpus (see tools/fetch_corpus.sh)
+# Never committed: third-party sources pinned by tools/fetch_corpus.sh.
+/.corpus/
+
 # Editors and IDEs
 .vscode/
 .idea/

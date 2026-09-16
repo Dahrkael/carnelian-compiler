@@ -9,6 +9,9 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+#[cfg(feature = "reference")]
+mod corpus;
+
 const PINS: &str = include_str!("../../../PINS.md");
 
 #[derive(Debug, Parser)]
@@ -58,6 +61,32 @@ enum Command {
         #[cfg_attr(feature = "prism", arg(long, default_value = "prism"))]
         #[cfg_attr(not(feature = "prism"), arg(long, default_value = "mri"))]
         frontend: String,
+    },
+    /// Run a directory of `.rb` files against the reference (dev only).
+    /// See `tools/fetch_corpus.sh` and `corpus/README.md`.
+    #[cfg(feature = "reference")]
+    Corpus {
+        /// Corpus root with `.rb` files.
+        #[arg(long, default_value = ".corpus")]
+        dir: PathBuf,
+        /// Comma-separated frontends (`mri`, `prism`) or `all`.
+        #[arg(long, default_value = "mri")]
+        frontends: String,
+        /// Baseline for `--check`/`--update`.
+        #[arg(long, default_value = "corpus/baseline.tsv")]
+        baseline: PathBuf,
+        /// Enforce the baseline (fail on any mismatch).
+        #[arg(long)]
+        check: bool,
+        /// Rewrite the baseline from this run.
+        #[arg(long)]
+        update: bool,
+        /// Write a markdown report here.
+        #[arg(long)]
+        report: Option<PathBuf>,
+        /// Add node-kind/opcode reachability (needs the `prism` feature).
+        #[arg(long)]
+        coverage: bool,
     },
 }
 
@@ -327,7 +356,7 @@ fn main() {
                 0
             } else {
                 #[cfg(feature = "reference")]
-                eprintln!("error: missing subcommand (compile|reference|verify) or --pins");
+                eprintln!("error: missing subcommand (compile|reference|verify|corpus) or --pins");
                 #[cfg(not(feature = "reference"))]
                 eprintln!("error: missing subcommand (compile) or --pins");
                 2
@@ -343,6 +372,27 @@ fn main() {
         Some(Command::Reference { input, output }) => cmd_reference(input, output),
         #[cfg(feature = "reference")]
         Some(Command::Verify { input, frontend }) => cmd_verify(input, frontend),
+        #[cfg(feature = "reference")]
+        Some(Command::Corpus {
+            dir,
+            frontends,
+            baseline,
+            check,
+            update,
+            report,
+            coverage,
+        }) => match corpus::parse_frontends(frontends) {
+            Ok(list) => corpus::cmd_corpus(corpus::Options {
+                dir: dir.clone(),
+                frontends: list,
+                baseline: baseline.clone(),
+                check: *check,
+                update: *update,
+                report: report.clone(),
+                coverage: *coverage,
+            }),
+            Err(code) => code,
+        },
     };
     std::process::exit(code);
 }
