@@ -581,6 +581,16 @@ pub trait BackendNode: AstNode + Clone + Sized {
         None
     }
 
+    /// Rational literal numerator and denominator (`RationalNode`).
+    fn rational(&self) -> Option<(IntegerLit, IntegerLit)> {
+        None
+    }
+
+    /// Imaginary literal numeric child (`ImaginaryNode`).
+    fn imaginary(&self) -> Option<Self> {
+        None
+    }
+
     /// String literal bytes (unescaped).
     fn string_lit(&self) -> Option<Vec<u8>> {
         None
@@ -751,6 +761,11 @@ pub trait BackendNode: AstNode + Clone + Sized {
 
     /// Interpolated string parts (`InterpolatedStringNode`).
     fn string_parts(&self) -> Option<Vec<Self>> {
+        None
+    }
+
+    /// Interpolated symbol parts (`InterpolatedSymbolNode`).
+    fn interp_symbol(&self) -> Option<Vec<Self>> {
         None
     }
 
@@ -981,6 +996,12 @@ pub trait BackendNode: AstNode + Clone + Sized {
         None
     }
 
+    /// Match-write `=~` call (`MatchWriteNode`); the named-capture
+    /// targets bind no locals, so only the call emits code.
+    fn match_write(&self) -> Option<Self> {
+        None
+    }
+
     /// Parentheses body (`ParenthesesNode`); `Some(None)` for empty `()`.
     fn parentheses_body(&self) -> Option<Option<Self>> {
         None
@@ -1123,6 +1144,22 @@ pub trait BackendNode: AstNode + Clone + Sized {
 
     /// Raw array elements (`ArrayNode`) including splats.
     fn raw_array_elements(&self) -> Option<Vec<Self>> {
+        None
+    }
+
+    /// `__FILE__` path bytes (`SourceFileNode`).
+    fn source_file(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// `__LINE__` marker (`SourceLineNode` carries only flags and span).
+    fn source_line(&self) -> Option<()> {
+        None
+    }
+
+    /// `__ENCODING__` marker (`SourceEncodingNode` carries only flags and
+    /// span).
+    fn source_encoding(&self) -> Option<()> {
         None
     }
 }

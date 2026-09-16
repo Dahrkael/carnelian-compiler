@@ -56,6 +56,15 @@ fn bigint_from_raw(raw: &[u8]) -> Option<IntegerLit> {
     Some(IntegerLit::Bigint { digits, negative })
 }
 
+/// Owned `Integer` to the handler literal (`I64` direct, fallback text
+/// through the shared decimal path).
+fn owned_integer_lit(value: &Integer) -> Option<IntegerLit> {
+    match value {
+        Integer::I64(value) => Some(IntegerLit::I64(*value)),
+        Integer::Fallback { raw } => bigint_from_raw(raw),
+    }
+}
+
 impl<'a> Owned<'a> {
     /// Reborrow a child node with the same pool.
     fn child(&self, node: &'a Node) -> Owned<'a> {
@@ -141,6 +150,27 @@ impl BackendNode for Owned<'_> {
     fn float_lit(&self) -> Option<f64> {
         match &self.node {
             Node::FloatNode { value, .. } => Some(*value),
+            _ => None,
+        }
+    }
+
+    fn rational(&self) -> Option<(IntegerLit, IntegerLit)> {
+        match &self.node {
+            Node::RationalNode {
+                numerator,
+                denominator,
+                ..
+            } => Some((
+                owned_integer_lit(numerator)?,
+                owned_integer_lit(denominator)?,
+            )),
+            _ => None,
+        }
+    }
+
+    fn imaginary(&self) -> Option<Self> {
+        match &self.node {
+            Node::ImaginaryNode { numeric, .. } => Some(self.child(numeric)),
             _ => None,
         }
     }
@@ -569,6 +599,13 @@ impl BackendNode for Owned<'_> {
     fn string_parts(&self) -> Option<Vec<Self>> {
         match &self.node {
             Node::InterpolatedStringNode { parts, .. } => Some(self.vec_children(parts)),
+            _ => None,
+        }
+    }
+
+    fn interp_symbol(&self) -> Option<Vec<Self>> {
+        match &self.node {
+            Node::InterpolatedSymbolNode { parts, .. } => Some(self.vec_children(parts)),
             _ => None,
         }
     }
@@ -1177,6 +1214,13 @@ impl BackendNode for Owned<'_> {
         }
     }
 
+    fn match_write(&self) -> Option<Self> {
+        match &self.node {
+            Node::MatchWriteNode { call, .. } => Some(self.child(call)),
+            _ => None,
+        }
+    }
+
     fn op_write(&self) -> Option<OpWriteView<Self>> {
         match &self.node {
             Node::LocalVariableOperatorWriteNode {
@@ -1438,6 +1482,27 @@ impl BackendNode for Owned<'_> {
     fn raw_array_elements(&self) -> Option<Vec<Self>> {
         match &self.node {
             Node::ArrayNode { elements, .. } => Some(self.vec_children(elements)),
+            _ => None,
+        }
+    }
+
+    fn source_file(&self) -> Option<Vec<u8>> {
+        match &self.node {
+            Node::SourceFileNode { filepath, .. } => Some(filepath.clone()),
+            _ => None,
+        }
+    }
+
+    fn source_line(&self) -> Option<()> {
+        match &self.node {
+            Node::SourceLineNode { .. } => Some(()),
+            _ => None,
+        }
+    }
+
+    fn source_encoding(&self) -> Option<()> {
+        match &self.node {
+            Node::SourceEncodingNode { .. } => Some(()),
             _ => None,
         }
     }

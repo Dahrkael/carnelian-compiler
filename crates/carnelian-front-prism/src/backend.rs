@@ -34,41 +34,59 @@ fn const_bytes(id: ruby_prism::ConstantId<'_>) -> Vec<u8> {
     id.as_slice().to_vec()
 }
 
+/// Borrowed Prism integer to the handler literal (shared by `IntegerNode`
+/// and the `RationalNode` numerator/denominator).
+fn prism_integer_lit(value: &ruby_prism::Integer<'_>) -> IntegerLit {
+    let (negative, limbs) = value.to_u32_digits();
+    if limbs.len() <= 4 {
+        let mut magnitude: u128 = 0;
+        for (index, limb) in limbs.iter().enumerate() {
+            magnitude |= u128::from(*limb) << (32 * index);
+        }
+        let fits = if negative {
+            magnitude <= 1u128 << 63
+        } else {
+            magnitude <= i64::MAX as u128
+        };
+        if fits {
+            let scalar = if negative {
+                if magnitude == 1u128 << 63 {
+                    i64::MIN
+                } else {
+                    -(magnitude as i64)
+                }
+            } else {
+                magnitude as i64
+            };
+            return IntegerLit::I64(scalar);
+        }
+    }
+    // Overflow: decimal digits of the value (`pm_integer_string`
+    // stringifies, so source radix, underscores and leading zeros never
+    // reach the pool).
+    IntegerLit::Bigint {
+        digits: limbs_to_decimal(limbs),
+        negative,
+    }
+}
+
 impl BackendNode for PrismNode<'_> {
     fn integer_lit(&self) -> Option<IntegerLit> {
         let node = self.inner.as_integer_node()?;
-        let value = node.value();
-        let (negative, limbs) = value.to_u32_digits();
-        if limbs.len() <= 4 {
-            let mut magnitude: u128 = 0;
-            for (index, limb) in limbs.iter().enumerate() {
-                magnitude |= u128::from(*limb) << (32 * index);
-            }
-            let fits = if negative {
-                magnitude <= 1u128 << 63
-            } else {
-                magnitude <= i64::MAX as u128
-            };
-            if fits {
-                let scalar = if negative {
-                    if magnitude == 1u128 << 63 {
-                        i64::MIN
-                    } else {
-                        -(magnitude as i64)
-                    }
-                } else {
-                    magnitude as i64
-                };
-                return Some(IntegerLit::I64(scalar));
-            }
-        }
-        // Overflow: decimal digits of the value (`pm_integer_string`
-        // stringifies, so source radix, underscores and leading zeros never
-        // reach the pool).
-        Some(IntegerLit::Bigint {
-            digits: limbs_to_decimal(limbs),
-            negative,
-        })
+        Some(prism_integer_lit(&node.value()))
+    }
+
+    fn rational(&self) -> Option<(IntegerLit, IntegerLit)> {
+        let node = self.inner.as_rational_node()?;
+        Some((
+            prism_integer_lit(&node.numerator()),
+            prism_integer_lit(&node.denominator()),
+        ))
+    }
+
+    fn imaginary(&self) -> Option<Self> {
+        let node = self.inner.as_imaginary_node()?;
+        Some(wrap(node.numeric()))
     }
 
     fn float_lit(&self) -> Option<f64> {
@@ -396,6 +414,11 @@ impl BackendNode for PrismNode<'_> {
 
     fn string_parts(&self) -> Option<Vec<Self>> {
         let node = self.inner.as_interpolated_string_node()?;
+        Some(wrap_many(node.parts()))
+    }
+
+    fn interp_symbol(&self) -> Option<Vec<Self>> {
+        let node = self.inner.as_interpolated_symbol_node()?;
         Some(wrap_many(node.parts()))
     }
 
@@ -846,6 +869,11 @@ impl BackendNode for PrismNode<'_> {
         Some(wrap(node.value()))
     }
 
+    fn match_write(&self) -> Option<Self> {
+        let node = self.inner.as_match_write_node()?;
+        Some(wrap(node.call().as_node()))
+    }
+
     fn op_write(&self) -> Option<OpWriteView<Self>> {
         if let Some(node) = self.inner.as_local_variable_operator_write_node() {
             return Some(OpWriteView {
@@ -1093,5 +1121,18 @@ impl BackendNode for PrismNode<'_> {
     fn raw_array_elements(&self) -> Option<Vec<Self>> {
         let node = self.inner.as_array_node()?;
         Some(node.elements().iter().map(wrap).collect())
+    }
+
+    fn source_file(&self) -> Option<Vec<u8>> {
+        let node = self.inner.as_source_file_node()?;
+        Some(node.filepath().to_vec())
+    }
+
+    fn source_line(&self) -> Option<()> {
+        self.inner.as_source_line_node().map(|_| ())
+    }
+
+    fn source_encoding(&self) -> Option<()> {
+        self.inner.as_source_encoding_node().map(|_| ())
     }
 }

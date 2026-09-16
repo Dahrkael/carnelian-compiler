@@ -132,6 +132,16 @@ pub const P2_SNIPPETS: &[(&str, &str)] = &[
     ("interp_noval_empty", "\"#{}\"\nputs 1\n"),
     ("interp_multi", "x = 1\ny = \"a\"\nputs \"a#{x}b#{y}c\"\n"),
     ("interp_side_effect", "\"hi #{puts 1}\"\nputs 2\n"),
+    ("isym_basic", "x = 1\nputs :\"s#{x}\"\n"),
+    ("isym_leading", "puts :\"#{1} hi\"\n"),
+    ("isym_only", "x = 1\nputs :\"#{x}\"\n"),
+    ("isym_multi", "x = 1\ny = \"a\"\nputs :\"a#{x}b#{y}c\"\n"),
+    ("isym_trailing", "x = 1\nputs :\"a#{x}b\"\n"),
+    ("isym_noval", ":\"s#{1 + 2}\"\nputs 1\n"),
+    ("isym_side_effect", ":\"s#{puts 1}\"\nputs 2\n"),
+    ("isym_empty_embexpr", "puts :\"#{}\"\n"),
+    ("isym_noval_empty", ":\"#{}\"\nputs 1\n"),
+    ("isym_empty_trailing", "puts :\"#{}abc\"\n"),
     ("range_incl", "a = 1..3\nputs a\n"),
     ("range_excl", "a = 1...3\nputs a\n"),
     ("range_index", "hex = [1, 2, 3]\nputs hex[0..1]\n"),
@@ -145,11 +155,7 @@ pub const P2_SNIPPETS: &[(&str, &str)] = &[
 ];
 
 /// `GATED` table from `p2_verify.rs`.
-pub const P2_GATED: &[(&str, &str, &str)] = &[(
-    "interp_symbol_gated",
-    "x = 1\nputs :\"s#{x}\"\n",
-    "InterpolatedSymbolNode",
-)];
+pub const P2_GATED: &[(&str, &str, &str)] = &[];
 
 /// `SNIPPETS` table from `p23_blocks.rs`.
 pub const P23_SNIPPETS: &[(&str, &str)] = &[
@@ -726,9 +732,29 @@ pub const P26_SNIPPETS: &[(&str, &str)] = &[
         "case_in_float",
         "x = 1.5\ncase x\nin 1.5 then puts 1\nelse puts 2\nend\n",
     ),
+    ("rational_lit", "puts 1r\n"),
+    ("rational_float", "puts 1.5r\n"),
+    ("imag_lit", "puts 1i\n"),
+    ("imag_float", "puts 1.5i\n"),
+    ("rational_noval", "1r\nputs 1\n"),
+    ("imag_noval", "1i\nputs 1\n"),
+    ("imag_float_noval", "1.5i\nputs 1\n"),
+    ("div_rational", "puts 2/3r\n"),
+    (
+        "case_in_rational",
+        "x = 1\ncase x\nin 1r then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_imag",
+        "x = 1\ncase x\nin 1i then puts 1\nelse puts 2\nend\n",
+    ),
     (
         "case_in_istr",
         "x = \"a1\"\ncase x\nin \"a#{1}\" then puts 1\nelse puts 2\nend\n",
+    ),
+    (
+        "case_in_isym",
+        "x = :a\ncase x\nin :\"a#{1 - 1}\" then puts 1\nelse puts 2\nend\n",
     ),
     (
         "case_in_const",
@@ -1023,6 +1049,23 @@ pub const P26_SNIPPETS: &[(&str, &str)] = &[
     ("backref_match_var", "puts $~\n"),
     ("backref_assign", "x = $&\nputs x\n"),
     ("backref_large_number", "puts $99999999999\n"),
+    // Magic constants (`__FILE__` bakes the compile filename, `__LINE__`
+    // the node's source line, `__ENCODING__` a zero-argument send).
+    ("magic_file", "puts __FILE__\n"),
+    ("magic_line", "puts __LINE__\n"),
+    ("magic_line_later", "puts 1\nputs 2\nputs __LINE__\n"),
+    ("magic_encoding", "puts __ENCODING__\n"),
+    ("magic_file_valued", "x = __FILE__\nputs x\n"),
+    ("magic_line_valued", "x = __LINE__\nputs x\n"),
+    ("magic_encoding_valued", "x = __ENCODING__\nputs x\n"),
+    ("magic_file_noval", "__FILE__\nputs 1\n"),
+    ("magic_line_noval", "__LINE__\nputs 1\n"),
+    ("magic_encoding_noval", "__ENCODING__\nputs 1\n"),
+    (
+        "hash_shorthand_valued",
+        "a = 1\nx = {a:}\nputs x\n",
+    ),
+    ("hash_shorthand_noval", "{a:}\nputs 1\n"),
 ];
 
 /// `GATED` table from `p26_specials.rs`.
@@ -1038,21 +1081,6 @@ pub const P26_GATED: &[(&str, &str, &str)] = &[
         "XStringNode",
     ),
     (
-        "case_in_rational_gated",
-        "x = 1\ncase x\nin 1r then puts 1\nelse puts 2\nend\n",
-        "RationalNode",
-    ),
-    (
-        "case_in_imag_gated",
-        "x = 1\ncase x\nin 1i then puts 1\nelse puts 2\nend\n",
-        "ImaginaryNode",
-    ),
-    (
-        "case_in_isym_gated",
-        "x = :a\ncase x\nin :\"a#{1 - 1}\" then puts 1\nelse puts 2\nend\n",
-        "InterpolatedSymbolNode",
-    ),
-    (
         "case_in_iregexp_gated",
         "x = \"a1\"\ncase x\nin /a#{1}/ then puts 1\nelse puts 2\nend\n",
         "InterpolatedRegularExpressionNode",
@@ -1065,7 +1093,7 @@ pub const P26_GATED: &[(&str, &str, &str)] = &[
     (
         "match_write_gated",
         "x = \"ab\"\nif /(?<c>a)/ =~ x then puts c\nend\nputs 2\n",
-        "MatchWriteNode",
+        "RegularExpressionNode",
     ),
     (
         "preexec_gated",

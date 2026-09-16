@@ -3,7 +3,9 @@
 //! Dispatch is on `kind_name` (1:1 with the C `switch` on node type); values
 //! travel through `BackendNode`, so FFI and owned frontends share handlers.
 
-use carnelian_ast::view::{BackendNode, CallView, CallWriteView, IndexWriteView, SimpleLit};
+use carnelian_ast::view::{
+    BackendNode, CallView, CallWriteView, IndexWriteView, IntegerLit, SimpleLit,
+};
 
 use crate::codegen::{LoopType, Scope, Session, JMPLINK_START};
 use crate::diagnostics::{Diagnostic, Diagnostics};
@@ -186,6 +188,11 @@ impl Codegen {
         if let Some(top) = self.scopes.first_mut() {
             top.filename = filename.to_vec();
         }
+    }
+
+    /// Compile filename (`filename_table[0]`); what `__FILE__` bakes.
+    fn filename(&self) -> &[u8] {
+        &self.scopes.first().expect("top").filename
     }
 
     /// Install the source for offset-to-line mapping (`node_lineno` reads
@@ -450,8 +457,13 @@ fn codegen_dispatch<N: BackendNode>(
         }
         "IntegerNode" => gen_integer(cg, node, val),
         "FloatNode" => gen_float(cg, node, val),
+        "RationalNode" => gen_rational(cg, node, val),
+        "ImaginaryNode" => gen_imaginary(cg, node, val),
         "StringNode" => gen_string(cg, node, val),
         "SymbolNode" => gen_symbol(cg, node, val),
+        "SourceFileNode" => gen_source_file(cg, node, val),
+        "SourceLineNode" => gen_source_line(cg, node, val),
+        "SourceEncodingNode" => gen_source_encoding(cg, node, val),
         "CallNode" => gen_call(cg, node, val),
         "IfNode" | "UnlessNode" => gen_if(cg, node, val),
         "ArrayNode" => gen_array(cg, node, val),
@@ -461,6 +473,7 @@ fn codegen_dispatch<N: BackendNode>(
         "MatchPredicateNode" => gen_match_predicate(cg, node, val),
         "MatchRequiredNode" => gen_match_required(cg, node, val),
         "InterpolatedStringNode" => gen_interp_string(cg, node, val),
+        "InterpolatedSymbolNode" => gen_interp_symbol(cg, node, val),
         "EmbeddedStatementsNode" => gen_branch(cg, node.embedded_body(), val),
         "EmbeddedVariableNode" => {
             let Some(variable) = node.embedded_var() else {
@@ -546,6 +559,19 @@ fn codegen_dispatch<N: BackendNode>(
         "RedoNode" => gen_redo(cg, node, val),
         "RangeNode" => gen_range(cg, node, val),
         "ParenthesesNode" => gen_parentheses(cg, node, val),
+        "MatchWriteNode" => {
+            let Some(call) = node.match_write() else {
+                return Err(unsupported(&node, "match write"));
+            };
+            // Named captures bind no locals; only the `=~` call emits code.
+            codegen(cg, call, val)
+        }
+        "ImplicitNode" => {
+            let Some(inner) = node.implicit_value() else {
+                return Err(unsupported(&node, "implicit node"));
+            };
+            codegen(cg, inner, val)
+        }
         "ArgumentsNode" => gen_arguments(cg, node, val),
         _ => Err(unsupported(&node, "node")),
     }
@@ -579,14 +605,20 @@ fn gen_integer<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(
     let Some(lit) = node.integer_lit() else {
         return Err(unsupported(&node, "integer literal"));
     };
+    emit_integer_lit(cg, lit)
+}
+
+/// Integer literal emission shared by `IntegerNode` and the `RationalNode`
+/// parts (`gen_pm_integer` plus the caller's `push`).
+fn emit_integer_lit(cg: &mut Codegen, lit: IntegerLit) -> Result<(), Diagnostic> {
     match lit {
-        carnelian_ast::view::IntegerLit::I64(value) => {
+        IntegerLit::I64(value) => {
             let (session, scope) = cg.current();
             let dst = scope.cursp();
             scope.gen_int(session, dst, value)?;
             scope.push_n(1)
         }
-        carnelian_ast::view::IntegerLit::Bigint { digits, negative } => {
+        IntegerLit::Bigint { digits, negative } => {
             let index = {
                 let (session, scope) = cg.current();
                 scope.new_litbint(session, &digits, 10, negative)? as u16
@@ -594,6 +626,71 @@ fn gen_integer<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(
             emit_load2(cg, opcode::OP_LOADL, index)
         }
     }
+}
+
+/// `Nr` literal (`PM_RATIONAL_NODE`): `Rational(numerator, denominator)`
+/// through `OP_SSEND` with the block-slot reserve.
+fn gen_rational<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    if !val {
+        return Ok(());
+    }
+    let Some((numerator, denominator)) = node.rational() else {
+        return Err(unsupported(&node, "rational literal"));
+    };
+    let recv = cg.current().1.cursp();
+    cg.current().1.push_n(1)?;
+    emit_integer_lit(cg, numerator)?;
+    emit_integer_lit(cg, denominator)?;
+    {
+        let (_, scope) = cg.current();
+        scope.push_n(1)?;
+        scope.pop_n(1)?;
+        scope.pop_n(3)?;
+    }
+    let sym = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, b"Rational")?
+    };
+    {
+        let (session, scope) = cg.current();
+        scope.genop_3(session, opcode::OP_SSEND, recv, sym, 2)?;
+    }
+    cg.current().1.push_n(1)
+}
+
+/// `Ni` literal (`PM_IMAGINARY_NODE`): `Complex(0, numeric)` through
+/// `OP_SSEND` with the block-slot reserve.
+fn gen_imaginary<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    if !val {
+        return Ok(());
+    }
+    let Some(numeric) = node.imaginary() else {
+        return Err(unsupported(&node, "imaginary literal"));
+    };
+    let recv = cg.current().1.cursp();
+    cg.current().1.push_n(1)?;
+    {
+        let (session, scope) = cg.current();
+        let dst = scope.cursp();
+        scope.gen_int(session, dst, 0)?;
+        scope.push_n(1)?;
+    }
+    codegen(cg, numeric, true)?;
+    {
+        let (_, scope) = cg.current();
+        scope.push_n(1)?;
+        scope.pop_n(1)?;
+        scope.pop_n(3)?;
+    }
+    let sym = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, b"Complex")?
+    };
+    {
+        let (session, scope) = cg.current();
+        scope.genop_3(session, opcode::OP_SSEND, recv, sym, 2)?;
+    }
+    cg.current().1.push_n(1)
 }
 
 /// Two-operand pool load at the cursor (`OP_STRING` and friends).
@@ -640,19 +737,79 @@ fn gen_symbol<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<()
     emit_load2(cg, opcode::OP_LOADSYM, index)
 }
 
-/// Interpolated string (`PM_INTERPOLATED_STRING_NODE`): `STRING` parts
-/// joined with `STRCAT`, with a leading empty literal unless the first part
-/// is already a string (so `STRCAT` never mutates a shared literal).
-fn gen_interp_string<N: BackendNode>(
+/// `__FILE__` (`PM_SOURCE_FILE_NODE`): the parse filepath as a string
+/// literal (`new_lit_str` + `OP_STRING`, valued only).
+fn gen_source_file<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    if !val {
+        return Ok(());
+    }
+    if node.source_file().is_none() {
+        return Err(unsupported(&node, "source file"));
+    }
+    // C bakes `cast->filepath`, which its parser seeds from the compile
+    // filename table (`filename_table[0]`, `"-e"` for string compiles).
+    // Our parses carry no filepath option (the `ruby-prism` wrapper exposes
+    // none), so the node bytes are empty; the Codegen filename installed by
+    // `set_filename` is the same value through our own table.
+    let filename = cg.filename().to_vec();
+    let (session, scope) = cg.current();
+    let index = scope.new_lit_str(session, &filename)? as u16;
+    emit_load2(cg, opcode::OP_STRING, index)
+}
+
+/// `__LINE__` (`PM_SOURCE_LINE_NODE`): the node's source line (the
+/// `node_lineno` newline-list lookup, valued only).
+fn gen_source_line<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(), Diagnostic> {
+    if !val {
+        return Ok(());
+    }
+    if node.source_line().is_none() {
+        return Err(unsupported(&node, "source line"));
+    }
+    let line = cg.line_for(node.span().start).unwrap_or(0);
+    let (session, scope) = cg.current();
+    let dst = scope.cursp();
+    scope.gen_int(session, dst, i64::from(line))?;
+    scope.push_n(1)
+}
+
+/// `__ENCODING__` (`PM_SOURCE_ENCODING_NODE`): a zero-argument `OP_SSEND`
+/// on self. The C arm has no `val` guard, so this always emits (even in
+/// void context), including the trailing `push(); pop();` `nregs`
+/// workaround.
+fn gen_source_encoding<N: BackendNode>(
     cg: &mut Codegen,
     node: N,
+    _val: bool,
+) -> Result<(), Diagnostic> {
+    if node.source_encoding().is_none() {
+        return Err(unsupported(&node, "source encoding"));
+    }
+    let sym = {
+        let (session, scope) = cg.current();
+        scope.new_sym(session, b"__ENCODING__")?
+    };
+    let (session, scope) = cg.current();
+    let dst = scope.cursp();
+    scope.genop_3(session, opcode::OP_SSEND, dst, sym, 0)?;
+    scope.push_n(1)?;
+    scope.push_n(1)?;
+    scope.pop_n(1)?;
+    Ok(())
+}
+
+/// Shared interpolation loop (`PM_INTERPOLATED_STRING_NODE` and
+/// `PM_INTERPOLATED_SYMBOL_NODE` in C): `STRING` parts joined with
+/// `STRCAT`, with a leading empty literal unless the first part is already
+/// a string (so `STRCAT` never mutates a shared literal). Callers check for
+/// empty parts first, so an empty list here is unreachable.
+fn gen_interp_loop<N: BackendNode>(
+    cg: &mut Codegen,
+    parts: Vec<N>,
     val: bool,
 ) -> Result<(), Diagnostic> {
-    let Some(parts) = node.string_parts() else {
-        return Err(unsupported(&node, "interpolated string"));
-    };
     let Some(first) = parts.first() else {
-        return Err(unsupported(&node, "empty interpolated string"));
+        return Err(internal_error("empty interpolation"));
     };
     let str_begin = first.kind_name() != "StringNode";
     if val {
@@ -678,6 +835,69 @@ fn gen_interp_string<N: BackendNode>(
         for part in parts {
             if part.kind_name() != "StringNode" {
                 codegen(cg, part, false)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Interpolated string (`PM_INTERPOLATED_STRING_NODE`): the shared loop.
+fn gen_interp_string<N: BackendNode>(
+    cg: &mut Codegen,
+    node: N,
+    val: bool,
+) -> Result<(), Diagnostic> {
+    let Some(parts) = node.string_parts() else {
+        return Err(unsupported(&node, "interpolated string"));
+    };
+    if parts.is_empty() {
+        return Err(unsupported(&node, "empty interpolated string"));
+    }
+    gen_interp_loop(cg, parts, val)
+}
+
+/// Interpolated symbol (`PM_INTERPOLATED_SYMBOL_NODE`): the shared loop,
+/// then the symbol tail (`pop`, the `OP_STRING`-at-cursor peephole into
+/// `OP_SYMBOL`, else `OP_INTERN`, `push`).
+fn gen_interp_symbol<N: BackendNode>(
+    cg: &mut Codegen,
+    node: N,
+    val: bool,
+) -> Result<(), Diagnostic> {
+    let Some(parts) = node.interp_symbol() else {
+        return Err(unsupported(&node, "interpolated symbol"));
+    };
+    if parts.is_empty() {
+        return Err(unsupported(&node, "empty interpolated symbol"));
+    }
+    gen_interp_loop(cg, parts, val)?;
+    if val {
+        cg.current().1.pop_n(1)?;
+        let fused = {
+            let (session, scope) = cg.current();
+            if scope.no_peephole(session) {
+                None
+            } else {
+                let data = scope.last_insn();
+                if data.insn == opcode::OP_STRING && data.a == u32::from(scope.cursp()) {
+                    Some((data.a as u16, data.b))
+                } else {
+                    None
+                }
+            }
+        };
+        match fused {
+            Some((dst, index)) => {
+                let (session, scope) = cg.current();
+                scope.pc = scope.lastpc;
+                scope.genop_2(session, opcode::OP_SYMBOL, dst, index)?;
+                scope.push_n(1)?;
+            }
+            None => {
+                let (session, scope) = cg.current();
+                let dst = scope.cursp();
+                scope.genop_1(session, opcode::OP_INTERN, dst)?;
+                scope.push_n(1)?;
             }
         }
     }
@@ -3065,6 +3285,7 @@ fn codegen_supports(kind: &str) -> bool {
             | "MatchPredicateNode"
             | "MatchRequiredNode"
             | "InterpolatedStringNode"
+            | "InterpolatedSymbolNode"
             | "EmbeddedStatementsNode"
             | "EmbeddedVariableNode"
             | "WhileNode"
