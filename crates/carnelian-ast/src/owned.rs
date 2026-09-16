@@ -1023,26 +1023,23 @@ impl BackendNode for Owned<'_> {
             Node::SuperNode {
                 arguments, block, ..
             } => {
-                if block.is_some() {
-                    return None;
-                }
+                let block = self.opt_child(block);
                 let Some(inner) = arguments.as_deref() else {
-                    return Some(SuperView { args: None });
+                    return Some(SuperView { args: None, block });
                 };
                 match inner {
                     Node::ArgumentsNode { arguments, .. } => {
+                        // Splat and keyword tails flow through `gen_values`
+                        // and `gen_hash` (mirroring C); the handler splits
+                        // them via `split_keywords`.
                         let mut out = Vec::new();
                         for argument in arguments {
-                            let child = self.child(argument);
-                            if matches!(
-                                child.node,
-                                Node::SplatNode { .. } | Node::KeywordHashNode { .. }
-                            ) {
-                                return None;
-                            }
-                            out.push(child);
+                            out.push(self.child(argument));
                         }
-                        Some(SuperView { args: Some(out) })
+                        Some(SuperView {
+                            args: Some(out),
+                            block,
+                        })
                     }
                     _ => None,
                 }

@@ -281,6 +281,10 @@ pub const P24_SNIPPETS: &[(&str, &str)] = &[
         "super_empty",
         "class A\n  def foo\n    1\n  end\nend\nclass B < A\n  def foo\n    super()\n  end\nend\nputs B.new.foo\n",
     ),
+    (
+        "super_splat",
+        "class A\n  def foo(a)\n    a\n  end\nend\nclass B < A\n  def foo(a)\n    super(*a)\n  end\nend\n",
+    ),
     ("def_optional", "def foo(a = 1)\n  a\nend\nputs foo\nputs foo(2)\n"),
     (
         "def_optional_multi",
@@ -393,11 +397,6 @@ pub const P24_GATED: &[(&str, &str, &str)] = &[
         "const_path_and_gated",
         "class Foo24i\nend\nFoo24i::Bar = true\nFoo24i::Bar &&= 1\nputs 1\n",
         "Not implemented: ConstantPathAndWriteNode",
-    ),
-    (
-        "super_splat_gated",
-        "class A\n  def foo(a)\n    a\n  end\nend\nclass B < A\n  def foo(a)\n    super(*a)\n  end\nend\n",
-        "super",
     ),
 ];
 

@@ -588,6 +588,8 @@ pub struct IndexWriteView<N> {
 pub struct SuperView<N> {
     /// Plain positional arguments (`None` for empty `super()`).
     pub args: Option<Vec<N>>,
+    /// Explicit block (`super() { }` literal or `super(&block)` argument).
+    pub block: Option<N>,
 }
 
 /// Handler-facing node access. See the module docs.

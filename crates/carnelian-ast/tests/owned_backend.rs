@@ -1314,8 +1314,9 @@ fn super_and_forwarding_super_gating() {
         block: None,
     };
     assert!(owned(&fwd, &pool).super_view().is_some());
-    // Splat, keyword hash and block forms stay gated.
-    for gated in [
+    // Splat, keyword hash and block forms flow through (`gen_values` /
+    // `gen_hash` / block codegen, mirroring C).
+    for open in [
         Node::SuperNode {
             flags: 0,
             span: span(),
@@ -1366,8 +1367,19 @@ fn super_and_forwarding_super_gating() {
             })),
         },
     ] {
-        assert!(owned(&gated, &pool).super_view().is_none());
+        assert!(owned(&open, &pool).super_view().is_some());
     }
+    // Non-`ArgumentsNode` argument shells stay gated.
+    let odd = Node::SuperNode {
+        flags: 0,
+        span: span(),
+        keyword_loc: span(),
+        lparen_loc: None,
+        arguments: Some(Box::new(int(1))),
+        rparen_loc: None,
+        block: None,
+    };
+    assert!(owned(&odd, &pool).super_view().is_none());
     // Forwarding super carries an optional block.
     let bare = Node::ForwardingSuperNode {
         flags: 0,

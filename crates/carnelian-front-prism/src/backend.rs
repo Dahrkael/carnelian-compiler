@@ -741,23 +741,21 @@ impl BackendNode for PrismNode<'_> {
 
     fn super_view(&self) -> Option<SuperView<Self>> {
         let node = self.inner.as_super_node()?;
-        if node.block().is_some() {
-            return None;
-        }
+        let block = node.block().map(wrap);
         let Some(arguments) = node.arguments() else {
-            return Some(SuperView { args: None });
+            return Some(SuperView { args: None, block });
         };
         let mut out = Vec::new();
         for argument in arguments.arguments().iter() {
-            let child = wrap(argument);
-            // `...` rides `gen_values` like a splat; other complex
-            // argument forms stay gated.
-            if matches!(child.kind_name(), "SplatNode" | "KeywordHashNode") {
-                return None;
-            }
-            out.push(child);
+            // Splat and keyword tails flow through `gen_values` and
+            // `gen_hash` (mirroring C); the handler splits them via
+            // `split_keywords`.
+            out.push(wrap(argument));
         }
-        Some(SuperView { args: Some(out) })
+        Some(SuperView {
+            args: Some(out),
+            block,
+        })
     }
 
     fn forwarding_super(&self) -> Option<Option<Self>> {

@@ -45,8 +45,8 @@ const DEFINED_SUPER_Q: &[u8] = b"__defined_super?";
 const DEFINED_CONST_PATH_Q: &[u8] = b"__defined_const_path?";
 const DEFINED_METHOD_ON_Q: &[u8] = b"__defined_method_on?";
 /// Stack threshold before flushing pending hash pairs: `GEN_VAL_STACK_MAX`,
-/// lifted past `INT16_MAX` once the cursor itself is past the small limit
-/// (kept separate so the future `gen_values` flush can share it).
+/// lifted past `INT16_MAX` once the cursor itself is past `GEN_LIT_ARY_MAX`
+/// (`gen_hash` only; `gen_values` lifts past `GEN_VAL_STACK_MAX` instead).
 fn val_stack_limit(cursp: u16) -> u32 {
     if cursp >= LIT_ARY_MAX as u16 {
         i16::MAX as u32
@@ -3781,7 +3781,15 @@ fn gen_values<N: BackendNode>(
     let mut limit = if limit == 0 { LIT_ARY_MAX } else { limit };
     let mut n: i32 = 0;
     let mut first = true;
-    let slimit = val_stack_limit(cg.current().1.cursp());
+    // `gen_values_upto`: the `INT16_MAX` lift trips on `GEN_VAL_STACK_MAX
+    // (99)` itself, unlike `gen_hash` which lifts past `GEN_LIT_ARY_MAX`.
+    // (An inner pair entering at `cursp` 98 must still flush once it
+    // reaches 99; lifting at 64 skips it and diverges.)
+    let slimit = if cg.current().1.cursp() >= VAL_STACK_MAX as u16 {
+        i16::MAX as u32
+    } else {
+        VAL_STACK_MAX
+    };
 
     if !val {
         for item in items {
@@ -6713,8 +6721,17 @@ fn gen_super<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(),
     cg.current().1.push_n(1)?;
     let mut count: i32 = 0;
     let mut stacked: i32 = 0;
+    // An explicit block (`super() { }`, `super(&block)`) replaces the
+    // block move. C nests this under `if (arguments)`, but C never sees a
+    // `SuperNode` without arguments (bare `super` is a forwarding node);
+    // ours can (`super()` lowers without args on one frontend), and there
+    // the reference still codegens the block.
+    let explicit_block = view.block;
     if let Some(args) = view.args {
-        let arg_count = gen_values(cg, args, true, CALL_ARG_LIMIT)?;
+        // Keyword tails compile after the positional prefix (`gen_hash`),
+        // mirroring C and `gen_yield`; `gen_values` stops at them.
+        let (items, keywords) = split_keywords(args);
+        let arg_count = gen_values(cg, items, true, CALL_ARG_LIMIT)?;
         if arg_count < 0 {
             stacked = 1;
             count = CALL_MAXARGS;
@@ -6723,8 +6740,23 @@ fn gen_super<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(),
             stacked = arg_count;
             count = arg_count;
         }
+        for keyword in keywords {
+            let Some(elements) = keyword.hash_elements() else {
+                return Err(unsupported(&keyword, "keyword arguments"));
+            };
+            let nk = gen_hash(cg, elements, true, CALL_ARG_LIMIT)?;
+            if nk < 0 {
+                stacked += 1;
+                count |= CALL_MAXARGS << 4;
+            } else {
+                stacked += nk * 2;
+                count |= nk << 4;
+            }
+        }
     }
-    if ainfo >= 0 {
+    if let Some(block) = explicit_block {
+        codegen(cg, block, true)?;
+    } else if ainfo >= 0 {
         gen_blkmove(cg, ainfo as u16, level)?;
     } else {
         let (session, scope) = cg.current();

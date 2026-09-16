@@ -31,7 +31,7 @@ impl Parsed {
             .result
             .diagnostics
             .iter()
-            .filter(|diagnostic| diagnostic.is_error())
+            .filter(|diagnostic| diagnostic.is_error() && !is_tolerated(diagnostic))
             .map(|diagnostic| ParseDiagnostic {
                 message: diagnostic.render_message(),
                 start: diagnostic.loc.begin as u32,
@@ -61,6 +61,17 @@ pub fn parse(source: &[u8]) -> Parsed {
         extra.extend(find_it_param(ast));
     }
     Parsed { result, extra }
+}
+
+/// Errors the reference tolerates: `def t(foo = foo)` carries a
+/// `CircularArgumentReference` diagnostic in both parsers (Prism:
+/// `PM_ERR_PARAMETER_CIRCULAR`), yet the pinned reference compiles it, so
+/// we demote it to a warning to stay byte-identical.
+fn is_tolerated(diagnostic: &lib_ruby_parser::Diagnostic) -> bool {
+    matches!(
+        diagnostic.message,
+        lib_ruby_parser::DiagnosticMessage::CircularArgumentReference { .. }
+    )
 }
 
 /// Bare `it` reads inside blocks (`it` is Ruby 3.4; the 3.1 grammar reads
