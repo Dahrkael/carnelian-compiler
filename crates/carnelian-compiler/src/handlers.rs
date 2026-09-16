@@ -4796,6 +4796,9 @@ fn gen_while<N: BackendNode>(cg: &mut Codegen, node: N, val: bool) -> Result<(),
     {
         let (_, scope) = cg.current();
         pc0 = scope.new_label();
+        // Continue label for `next` (`lp->pc0`, stored before the
+        // predicate like in C so it re-evaluates the condition).
+        scope.loops.last_mut().expect("loop").pc0 = pc0;
     }
     codegen(cg, predicate, true)?;
     {

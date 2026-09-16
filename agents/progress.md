@@ -657,5 +657,26 @@ regexp (`match_capture_targets`); `=~` sends route through
 `match_write_of` (plain infix shape only); the scope pass rewrites a bare
 call naming a declared local into a read (locals shadow methods, like the
 parser). Binding rules mirror Prism exactly: static regexp only (interp/
-dynamic bind nothing), reversed `"str" =~ /re/` binds nothing, use-before-
-bind stays a call, barriers respected.
+  dynamic bind nothing), reversed `"str" =~ /re/` binds nothing, use-before-
+  bind stays a call, barriers respected.
+
+## Issue #2 follow-up: `next` continue label (real bug, fixed before master merge)
+
+Client (v0.1.1 integration test) found a 1-instruction divergence with real
+semantics: `next` inside `while`/`until` emitted `OP_JMPUW` targeting pc 0
+(`OP_ENTER`) instead of the loop continue label → infinite loop at runtime
+(`def f; while true; next; end; end`: reference `-4` → pc 4, ours `-8` → 0).
+
+Root cause: `gen_while` created the `pc0` label but never stored it into
+the loop frame (`loops[].pc0` stayed `JMPLINK_START`); every other loop
+form stores it. One-line fix mirroring C (`lp->pc0 = new_label(s)` before
+the predicate, so `next` re-evaluates the condition). The const-predicate
+shape already matched C via the `genjmp2` peephole (predicate elided), so
+the operand was the only delta. Verified byte-identical on all 3 frontends
+× both modes, incl. the client's semantic shape (`next if i == 2` → sums
+correctly by construction of byte-identity).
+- Lock-in goldens: `next_while_noval/valued`, `next_until`,
+  `next_infinite` (the exact reported shape).
+- DBG note from the client (23 files differ, line numbers correct) needs
+  no action: the reference dumps with flags 0 (no `DBG` section at all);
+  our `verify` ignores `DBG` by design until the reference emits it.

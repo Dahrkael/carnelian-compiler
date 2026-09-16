@@ -667,6 +667,21 @@ pub const P25_SNIPPETS: &[(&str, &str)] = &[
     ("next_plain", "1.times { next }\nputs 1\n"),
     ("next_for", "for i in [1, 2] do\n  next\nend\nputs 1\n"),
     (
+        "next_while_noval",
+        "i = 0\nwhile i < 3 do\n  i = i + 1\n  next\nend\nputs i\n",
+    ),
+    // `next` must target the loop continue label, not address 0
+    // (issue #2: wrong `OP_JMPUW` operand caused an infinite loop).
+    (
+        "next_while_valued",
+        "def f\n  i = 0\n  s = 0\n  while i < 5\n    i += 1\n    next if i == 2\n    s += i\n  end\n  s\nend\nputs f\n",
+    ),
+    (
+        "next_until",
+        "def f\n  i = 0\n  until i >= 3\n    i += 1\n    next if i == 2\n  end\n  i\nend\nputs f\n",
+    ),
+    ("next_infinite", "def f\n  while true\n    next\n  end\nend\n"),
+    (
         "redo_loop",
         "i = 0\nwhile i < 3 do\n  i = i + 1\n  redo if false\nend\nputs i\n",
     ),
