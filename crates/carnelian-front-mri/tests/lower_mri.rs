@@ -9,7 +9,7 @@ use carnelian_ast::{
     keyword_hash_node_flags, loop_flags, range_flags, regular_expression_flags, Integer, Node,
     SymbolId, SymbolPool,
 };
-use carnelian_front_mri::lower;
+use carnelian_front_mri::{lower, lower_with_source};
 
 /// Parse, failing the test on error diagnostics (warnings are fine).
 /// Options mirror production `parse()` so option-sensitive behavior
@@ -34,6 +34,13 @@ fn parse(src: &str) -> Box<lib_ruby_parser::Node> {
 fn lowered(src: &str) -> (Node, SymbolPool) {
     let root = parse(src);
     lower(&root)
+}
+
+/// Lower one snippet with source text installed (enables span-based
+/// re-lexing, e.g. adjacent string literals).
+fn lowered_with_source(src: &str) -> (Node, SymbolPool) {
+    let root = parse(src);
+    lower_with_source(&root, src.as_bytes())
 }
 
 /// Resolve an interned name for assertions.
@@ -269,6 +276,48 @@ fn interpolated_ivar_part() {
     }
 }
 
+/// Adjacent literals re-split from source into interpolation parts.
+#[test]
+fn adjacent_strings_split() {
+    let (node, _) = lowered_with_source("puts(\"A\" \"B\")");
+    match node {
+        Node::CallNode { arguments, .. } => match *arguments.expect("call args") {
+            Node::ArgumentsNode { ref arguments, .. } => match &arguments[0] {
+                Node::InterpolatedStringNode { parts, .. } => {
+                    assert_eq!(parts.len(), 2);
+                    match &parts[0] {
+                        Node::StringNode { unescaped, .. } => assert_eq!(unescaped, b"A"),
+                        other => panic!("part 0 is {}", other.kind_name()),
+                    }
+                    match &parts[1] {
+                        Node::StringNode { unescaped, .. } => assert_eq!(unescaped, b"B"),
+                        other => panic!("part 1 is {}", other.kind_name()),
+                    }
+                }
+                other => panic!("lowered to {}", other.kind_name()),
+            },
+            ref other => panic!("args lowered to {}", other.kind_name()),
+        },
+        other => panic!("lowered to {}", other.kind_name()),
+    }
+}
+
+/// A single literal never splits, even with source installed.
+#[test]
+fn single_string_stays_folded() {
+    let (node, _) = lowered_with_source("puts(\"AB\")");
+    match node {
+        Node::CallNode { arguments, .. } => match *arguments.expect("call args") {
+            Node::ArgumentsNode { ref arguments, .. } => match &arguments[0] {
+                Node::StringNode { unescaped, .. } => assert_eq!(unescaped, b"AB"),
+                other => panic!("lowered to {}", other.kind_name()),
+            },
+            ref other => panic!("args lowered to {}", other.kind_name()),
+        },
+        other => panic!("lowered to {}", other.kind_name()),
+    }
+}
+
 /// Plain regexps copy bytes; option letters become flag bits.
 #[test]
 fn regexp_plain_and_flags() {
@@ -320,6 +369,39 @@ fn heredoc_shapes() {
     }
     let (node, _) = lowered("a = <<~EOS\n#{x}\nEOS");
     assert!(matches!(node, Node::LocalVariableWriteNode { .. }));
+}
+
+/// Squiggly heredocs keep one part per body line (runtime-concatenated).
+#[test]
+fn squiggly_heredoc_splits_lines() {
+    let (node, _) = lowered_with_source("x = <<~JS\n  hello\n  world\nJS\n");
+    match node {
+        Node::LocalVariableWriteNode { value, .. } => match *value {
+            Node::InterpolatedStringNode { parts, .. } => {
+                assert_eq!(parts.len(), 2);
+                for part in &parts {
+                    assert!(matches!(part, Node::StringNode { .. }));
+                }
+            }
+            other => panic!("lowered to {}", other.kind_name()),
+        },
+        other => panic!("lowered to {}", other.kind_name()),
+    }
+}
+
+/// Plain heredocs fold even with source installed.
+#[test]
+fn plain_heredoc_stays_folded() {
+    let (node, _) = lowered_with_source("x = <<JS\n  hello\n  world\nJS\n");
+    match node {
+        Node::LocalVariableWriteNode { value, .. } => match *value {
+            Node::StringNode { unescaped, .. } => {
+                assert_eq!(unescaped, b"  hello\n  world\n")
+            }
+            other => panic!("lowered to {}", other.kind_name()),
+        },
+        other => panic!("lowered to {}", other.kind_name()),
+    }
 }
 
 /// Dynamic symbols lower to interpolated symbols.
@@ -643,7 +725,7 @@ fn block_destructured_arg() {
     }
 }
 
-/// Numbered blocks keep a blank `NumberedParametersNode` over reads.
+/// Numbered blocks carry the grammar `numargs` over reads.
 #[test]
 fn numblock_blank_maximum() {
     let (node, pool) = lowered("foo { _1 }");
@@ -655,7 +737,7 @@ fn numblock_blank_maximum() {
                 ..
             } => {
                 match parameters.as_deref().expect("numbered params") {
-                    Node::NumberedParametersNode { maximum, .. } => assert_eq!(*maximum, 0),
+                    Node::NumberedParametersNode { maximum, .. } => assert_eq!(*maximum, 1),
                     other => panic!("params lowered to {}", other.kind_name()),
                 }
                 match body.as_deref().expect("body") {

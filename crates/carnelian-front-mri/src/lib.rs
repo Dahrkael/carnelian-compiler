@@ -8,7 +8,7 @@ pub mod lower;
 pub mod parse;
 pub mod scope;
 
-pub use lower::lower;
+pub use lower::{lower, lower_with_source};
 pub use parse::{parse, ParseDiagnostic, Parsed};
 pub use scope::resolve_scopes;
 
@@ -30,7 +30,7 @@ pub fn compile(source: &str, opts: &CompileOptions) -> Result<Vec<u8>, Diagnosti
     // MRI has no program envelope; synthesize it so the backend sees the
     // same root shape as the Prism path (the scope pass fills `locals`).
     let (inner, mut pool) = match parsed.root() {
-        Some(root) => lower(root),
+        Some(root) => lower_with_source(root, source.as_bytes()),
         None => {
             let span = Span { start: 0, end: 0 };
             (

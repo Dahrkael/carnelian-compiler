@@ -1,8 +1,8 @@
 //! MRI lowering: `lib-ruby-parser` tree to the owned AST (P4-A).
 //!
 //! Covers the 3.1.2 grammar 1:1. Scope data stays blank here (`depth`
-//! zero, `locals` empty, `NumberedParametersNode.maximum` zero); the scope
-//! pass fills them afterwards. A bare-word call with no receiver, args,
+//! zero, `locals` empty); the scope pass fills them afterwards. Numbered
+//! blocks carry the grammar `numargs`. A bare-word call with no receiver, args,
 //! parens or block keeps the `VARIABLE_CALL` flag so the scope pass can
 //! rewrite it to a local read when the name resolves.
 
@@ -12,6 +12,7 @@ use carnelian_ast::{
     Span, SymbolId, SymbolPool,
 };
 use lib_ruby_parser::nodes::*;
+use lib_ruby_parser::traverse::visitor::Visitor;
 use lib_ruby_parser::Loc;
 use lib_ruby_parser::Node as Mri;
 
@@ -19,7 +20,14 @@ type Pool = SymbolPool;
 
 /// Lower an MRI tree to its owned tree plus symbol pool.
 pub fn lower(root: &Mri) -> (Node, SymbolPool) {
+    lower_with_source(root, b"")
+}
+
+/// Lower with source text installed: enables span-based re-lexing that
+/// needs the original bytes (adjacent string literals a parser folded).
+pub fn lower_with_source(root: &Mri, source: &[u8]) -> (Node, SymbolPool) {
     let mut pool = SymbolPool::new();
+    pool.set_source(source);
     let node = conv(root, &mut pool);
     (node, pool)
 }
@@ -362,7 +370,16 @@ fn conv(node: &Mri, pool: &mut Pool) -> Node {
         Mri::Dstr(inner) => {
             let span = espan(node);
             let parts: Vec<Node> = inner.parts.iter().map(|p| interp_part(p, pool)).collect();
-            if parts_all_plain(&inner.parts) {
+            // All-plain parts fold into one literal, EXCEPT adjacent
+            // literals (`"A" "B"`): the reference keeps the pieces and
+            // concatenates at runtime. The span scan tells them apart from
+            // single literals with continuations (which scan as 1 piece).
+            let adjacent = parts.len() > 1
+                && pool.source().is_some_and(|source| {
+                    split_adjacent(span, &concat_str_bytes(&inner.parts), source)
+                        .is_some_and(|pieces| pieces.len() == parts.len())
+                });
+            if parts_all_plain(&inner.parts) && !adjacent {
                 Node::StringNode {
                     flags: 0,
                     span,
@@ -491,7 +508,20 @@ fn conv(node: &Mri, pool: &mut Pool) -> Node {
         ),
         Mri::Heredoc(inner) => {
             let whole = espan(node);
-            if parts_all_plain(&inner.parts) {
+            // Squiggly heredocs (`<<~`) with several plain parts keep one
+            // pool entry per part: the reference concatenates them at
+            // runtime instead of folding. Plain heredocs always fold (their
+            // bodies arrive as a single part). The `<<~` marker
+            // disambiguates; interpolated squiggly bodies keep the
+            // interpolation path below untouched.
+            let tilde = pool.source().is_some_and(|source| {
+                let start = usize::try_from(whole.start).unwrap_or(usize::MAX);
+                source
+                    .get(start..)
+                    .is_some_and(|tail| tail.starts_with(b"<<~"))
+            });
+            let all_plain = parts_all_plain(&inner.parts);
+            if all_plain && !tilde {
                 Node::StringNode {
                     flags: 0,
                     span: whole,
@@ -500,12 +530,49 @@ fn conv(node: &Mri, pool: &mut Pool) -> Node {
                     closing_loc: None,
                     unescaped: concat_str_bytes(&inner.parts),
                 }
+            } else if tilde && all_plain {
+                // Plain `<<~`: single parts fold like the reference; several
+                // parts concatenate at runtime. Misdedented indent (mixed
+                // tab/space, backslash-led lines) is rebuilt from source.
+                match mixed_squiggly_parts(pool.source(), &inner.heredoc_body_l, whole) {
+                    Some(redone) => Node::InterpolatedStringNode {
+                        flags: 0,
+                        span: whole,
+                        opening_loc: None,
+                        parts: fix_heredoc_gaps(redone, pool),
+                        closing_loc: None,
+                    },
+                    None if inner.parts.len() == 1 => Node::StringNode {
+                        flags: 0,
+                        span: whole,
+                        opening_loc: None,
+                        content_loc: span(&inner.heredoc_body_l),
+                        closing_loc: None,
+                        unescaped: concat_str_bytes(&inner.parts),
+                    },
+                    None => {
+                        let parts: Vec<Node> =
+                            inner.parts.iter().map(|p| interp_part(p, pool)).collect();
+                        Node::InterpolatedStringNode {
+                            flags: 0,
+                            span: whole,
+                            opening_loc: None,
+                            parts: fix_heredoc_gaps(parts, pool),
+                            closing_loc: None,
+                        }
+                    }
+                }
             } else {
+                let parts: Vec<Node> = inner.parts.iter().map(|p| interp_part(p, pool)).collect();
+                // Nested-heredoc resumptions split here (`y\nmm1\n` →
+                // `y\n` + `mm1\n`); plain parts cannot open a heredoc, so
+                // this never fires on the plain path above.
+                let parts = split_nested_resumption(&inner.parts, parts);
                 Node::InterpolatedStringNode {
                     flags: 0,
                     span: whole,
                     opening_loc: None,
-                    parts: inner.parts.iter().map(|p| interp_part(p, pool)).collect(),
+                    parts: fix_heredoc_gaps(parts, pool),
                     closing_loc: None,
                 }
             }
@@ -1089,9 +1156,602 @@ fn parts_span(parts: &[Mri], fallback: Span) -> Span {
     }
 }
 
+/// Whether an MRI subtree opens a nested heredoc (`Heredoc`/`XHeredoc`).
+struct HeredocScan {
+    found: bool,
+}
+
+impl Visitor for HeredocScan {
+    fn on_heredoc(&mut self, _node: &Heredoc) {
+        self.found = true;
+    }
+
+    fn on_x_heredoc(&mut self, _node: &XHeredoc) {
+        self.found = true;
+    }
+}
+
+fn subtree_opens_heredoc(node: &Mri) -> bool {
+    let mut scan = HeredocScan { found: false };
+    scan.visit(node);
+    scan.found
+}
+
+/// Restore whitespace a squiggly dedent stripped from mid-line fragments.
+///
+/// MRI dedents every heredoc part as if line-initial; the reference only
+/// strips line-leading whitespace, so a fragment following `#{...}` on the
+/// same line keeps its spaces (`#{x} = JSON...`). For each non-first plain
+/// part, unescape its source slice and adopt it when it is exactly the
+/// lowered value plus stripped spaces/tabs — anything else keeps the
+/// lowered value, so the fix can only restore, never corrupt.
+
+/// Split the part following a nested-heredoc interpolation (`y\nmm1\n` →
+/// `y\n` + `mm1\n`): the reference lexer flushes the outer content when a
+/// nested heredoc takes over, while the 3.1 grammar keeps one glued part.
+/// Only fires past an interpolation that opens a heredoc, so plain glued
+/// parts (`q\nr\n`) stay untouched.
+fn split_nested_resumption(mri_parts: &[Mri], parts: Vec<Node>) -> Vec<Node> {
+    let mut out = Vec::with_capacity(parts.len() + 1);
+    let mut owned = parts.into_iter();
+    for (index, _) in mri_parts.iter().enumerate() {
+        let Some(part) = owned.next() else { break };
+        let nested_before = index > 0 && subtree_opens_heredoc(&mri_parts[index - 1]);
+        let Node::StringNode {
+            flags,
+            span,
+            opening_loc,
+            content_loc,
+            closing_loc,
+            unescaped,
+        } = part
+        else {
+            out.push(part);
+            continue;
+        };
+        let rebuild = |head: &[u8], tail: &[u8]| {
+            // Carve source spans; clamp to the part span (decoded values
+            // can be shorter than their source slice).
+            let cut = span.start.saturating_add(head.len() as u32).min(span.end);
+            [
+                Node::StringNode {
+                    flags,
+                    span: Span {
+                        start: span.start,
+                        end: cut,
+                    },
+                    opening_loc,
+                    content_loc,
+                    closing_loc,
+                    unescaped: head.to_vec(),
+                },
+                Node::StringNode {
+                    flags,
+                    span: Span {
+                        start: cut,
+                        end: span.end,
+                    },
+                    opening_loc,
+                    content_loc,
+                    closing_loc,
+                    unescaped: tail.to_vec(),
+                },
+            ]
+        };
+        match (nested_before, unescaped.iter().position(|b| *b == b'\n')) {
+            (true, Some(pos)) if pos + 1 < unescaped.len() => {
+                let (head, tail) = unescaped.split_at(pos + 1);
+                let [first, second] = rebuild(head, tail);
+                out.push(first);
+                out.push(second);
+            }
+            _ => out.push(Node::StringNode {
+                flags,
+                span,
+                opening_loc,
+                content_loc,
+                closing_loc,
+                unescaped,
+            }),
+        }
+    }
+    out.extend(owned);
+    out
+}
+
+/// Tab column advance (`PM_TAB_WHITESPACE_SIZE` is 8 in the reference
+/// lexer: a tab jumps to the next multiple of 8).
+fn tab_advance(trimmed: usize) -> usize {
+    (trimmed / 8 + 1) * 8
+}
+
+/// Tab-aware column width of leading indent.
+fn squiggly_width(indent: &[u8]) -> usize {
+    let mut width = 0;
+    for byte in indent {
+        if *byte == b'\t' {
+            width = tab_advance(width);
+        } else {
+            width += 1;
+        }
+    }
+    width
+}
+
+/// Strip up to `common` columns of leading whitespace, mirroring
+/// `parse_heredoc_dedent_string`: a tab that would overshoot keeps the
+/// line raw from the tab on.
+fn squiggly_strip(line: &[u8], common: usize) -> &[u8] {
+    let mut trimmed = 0;
+    let mut cursor = 0;
+    while cursor < line.len() && (line[cursor] == b' ' || line[cursor] == b'\t') && trimmed < common
+    {
+        if line[cursor] == b'\t' {
+            let next = tab_advance(trimmed);
+            if next > common {
+                break;
+            }
+            trimmed = next;
+        } else {
+            trimmed += 1;
+        }
+        cursor += 1;
+    }
+    &line[cursor..]
+}
+
+/// Plain `<<~` whose indent the 3.1 grammar miscomputes, rebuilt from
+/// source with the reference tab-aware widths: mixed tab/space indent
+/// (the grammar over-dedents) and backslash-led lines (zero width, so the
+/// reference skips dedent while the grammar strips the escape as indent).
+/// Each line is unescaped (unless `<<~'x'` single-quoted) then stripped,
+/// mirroring the reference order. Returns `None` for every other shape,
+/// leaving it on the lowering path.
+fn mixed_squiggly_parts(source: Option<&[u8]>, body: &Loc, whole: Span) -> Option<Vec<Node>> {
+    let source = source?;
+    let (start, end) = (body.begin, body.end);
+    let text = source.get(start..end)?;
+    let mut lines: Vec<&[u8]> = Vec::new();
+    let mut rest = text;
+    while let Some(pos) = rest.iter().position(|b| *b == b'\n') {
+        lines.push(&rest[..pos + 1]);
+        rest = &rest[pos + 1..];
+    }
+    if !rest.is_empty() {
+        lines.push(rest);
+    }
+    let non_empty: Vec<&&[u8]> = lines
+        .iter()
+        .filter(|line| {
+            line.iter()
+                .any(|b| *b != b' ' && *b != b'\t' && *b != b'\n')
+        })
+        .collect();
+    let tab_led = non_empty.iter().any(|line| line.first() == Some(&b'\t'));
+    let space_led = non_empty.iter().any(|line| line.first() == Some(&b' '));
+    let backslash_led = non_empty.iter().any(|line| line.first() == Some(&b'\\'));
+    if !((tab_led && space_led) || backslash_led) {
+        return None;
+    }
+    let common = non_empty
+        .iter()
+        .map(|line| {
+            let indent = line
+                .iter()
+                .take_while(|b| **b == b' ' || **b == b'\t')
+                .count();
+            squiggly_width(&line[..indent])
+        })
+        .min()?;
+    let mut cursor = start;
+    let mut out = Vec::with_capacity(lines.len());
+    let single = {
+        let wstart = usize::try_from(whole.start).unwrap_or(usize::MAX);
+        source
+            .get(wstart..)
+            .is_some_and(|tail| tail.starts_with(b"<<~'"))
+    };
+    for (index, line) in lines.iter().enumerate() {
+        // Scratch decode so borrows stay local to the iteration.
+        let scratch;
+        let decoded: &[u8] = if single {
+            line
+        } else if let Some(value) = unescape_bytes(line, true) {
+            // A joined continuation (`\` + newline) would corrupt the
+            // per-line split; bail to the lowering path instead.
+            if index + 1 < lines.len() && !value.ends_with(b"\n") {
+                return None;
+            }
+            scratch = value;
+            &scratch
+        } else {
+            line
+        };
+        let stripped = squiggly_strip(decoded, common);
+        let base = u32::try_from(cursor).unwrap_or(u32::MAX);
+        let span = Span {
+            start: base,
+            end: base.saturating_add(u32::try_from(line.len()).unwrap_or(u32::MAX)),
+        };
+        out.push(Node::StringNode {
+            flags: 0,
+            span,
+            opening_loc: None,
+            content_loc: span,
+            closing_loc: None,
+            unescaped: stripped.to_vec(),
+        });
+        cursor += line.len();
+    }
+    Some(out)
+}
+
+fn fix_heredoc_gaps(parts: Vec<Node>, pool: &SymbolPool) -> Vec<Node> {
+    let Some(source) = pool.source() else {
+        return parts;
+    };
+    let mut first = true;
+    parts
+        .into_iter()
+        .map(|part| {
+            let (span, unescaped) = match &part {
+                Node::StringNode {
+                    span, unescaped, ..
+                } => (*span, unescaped.clone()),
+                _ => return part,
+            };
+            if first {
+                first = false;
+                return part;
+            }
+            let start = usize::try_from(span.start).unwrap_or(usize::MAX);
+            let end = usize::try_from(span.end).unwrap_or(usize::MAX);
+            // Line-initial parts keep the lowered value: walk back over
+            // spaces/tabs, and only look further when something else
+            // precedes on the same line (a mid-line fragment whose indent
+            // the dedent wrongly stripped).
+            let mut cursor = start;
+            while cursor > 0 && matches!(source.get(cursor - 1), Some(b' ') | Some(b'\t')) {
+                cursor -= 1;
+            }
+            let line_initial = cursor == 0 || source.get(cursor - 1) == Some(&b'\n');
+            let fixed = if line_initial {
+                unescaped
+            } else {
+                match source
+                    .get(start..end)
+                    .and_then(|raw| unescape_bytes(raw, true))
+                {
+                    Some(candidate)
+                        if candidate.len() > unescaped.len()
+                            && candidate.ends_with(unescaped.as_slice())
+                            && candidate[..candidate.len() - unescaped.len()]
+                                .iter()
+                                .all(|b| *b == b' ' || *b == b'\t') =>
+                    {
+                        candidate
+                    }
+                    _ => unescaped,
+                }
+            };
+            match part {
+                Node::StringNode {
+                    flags,
+                    span,
+                    opening_loc,
+                    content_loc,
+                    closing_loc,
+                    ..
+                } => Node::StringNode {
+                    flags,
+                    span,
+                    opening_loc,
+                    content_loc,
+                    closing_loc,
+                    unescaped: fixed,
+                },
+                other => other,
+            }
+        })
+        .collect()
+}
+
 /// True when every part is a plain `Str` (no interpolation).
 fn parts_all_plain(parts: &[Mri]) -> bool {
     parts.iter().all(|part| matches!(part, Mri::Str(_)))
+}
+
+/// One plain piece of an adjacent-literals run, as source offsets.
+struct AdjacentPiece {
+    /// Whole piece (opening delimiter through closer), absolute offsets.
+    start: usize,
+    end: usize,
+    /// Opening delimiter length in bytes (`1` for quotes, `2` for `%Q(`).
+    open_len: usize,
+    /// Unescape like a double-quoted literal (`""`, `%Q`, `%()`).
+    double: bool,
+}
+
+/// Split a folded adjacent-literals run (`"A" "B"`) into its pieces, or
+/// `None` when the span does not cleanly hold 2+ plain pieces. The MRI
+/// lexer folds the run into one value; the reference (Prism) keeps the
+/// pieces and concatenates at runtime, so byte-identity needs the split.
+/// `folded` is the lexer's value: the joined pieces must reproduce it
+/// exactly, otherwise the run is left folded (never guess bytes).
+fn split_adjacent(span: Span, folded: &[u8], source: &[u8]) -> Option<Vec<AdjacentPiece>> {
+    fn skip_gap(text: &[u8], mut pos: usize) -> Option<usize> {
+        loop {
+            while pos < text.len() && matches!(text[pos], b' ' | b'\t' | b'\n' | b'\r' | 0x0c) {
+                pos += 1;
+            }
+            if text.get(pos) == Some(&b'#') {
+                while pos < text.len() && text[pos] != b'\n' {
+                    pos += 1;
+                }
+                continue;
+            }
+            return Some(pos);
+        }
+    }
+    fn closing_for(open: u8) -> Option<u8> {
+        match open {
+            b'(' => Some(b')'),
+            b'[' => Some(b']'),
+            b'{' => Some(b'}'),
+            b'<' => Some(b'>'),
+            _ => None,
+        }
+    }
+    let start = usize::try_from(span.start).ok()?;
+    let end = usize::try_from(span.end).ok()?;
+    let text = source.get(start..end)?;
+    let mut pieces = Vec::new();
+    let mut pos = skip_gap(text, 0)?;
+    while pos < text.len() {
+        let (open_len, close, double, nested) = match text[pos] {
+            b'"' => (1, b'"', true, false),
+            b'\'' => (1, b'\'', false, false),
+            b'%' => {
+                let (kind, rest) = match text.get(pos + 1) {
+                    Some(b'Q') => (true, pos + 2),
+                    Some(b'q') => (false, pos + 2),
+                    Some(b'(') | Some(b'[') | Some(b'{') | Some(b'<') => (true, pos + 1),
+                    Some(c) if !c.is_ascii_alphanumeric() && *c != b'_' => (true, pos + 1),
+                    _ => return None,
+                };
+                let delim = *text.get(rest)?;
+                match closing_for(delim) {
+                    Some(close) => (rest + 1 - pos, close, kind, true),
+                    None => {
+                        if delim.is_ascii_alphanumeric() || delim == b'_' {
+                            return None;
+                        }
+                        (rest + 1 - pos, delim, kind, false)
+                    }
+                }
+            }
+            _ => return None,
+        };
+        let mut cursor = pos + open_len;
+        let mut depth = 0usize;
+        let content_end = loop {
+            let byte = *text.get(cursor)?;
+            if byte == b'\\' {
+                cursor += 2;
+                continue;
+            }
+            if nested && byte == text[pos + open_len - 1] {
+                depth += 1;
+                cursor += 1;
+                continue;
+            }
+            if byte == close {
+                if nested && depth > 0 {
+                    depth -= 1;
+                    cursor += 1;
+                    continue;
+                }
+                break cursor;
+            }
+            cursor += 1;
+        };
+        pieces.push(AdjacentPiece {
+            start: start + pos,
+            end: start + content_end + 1,
+            open_len,
+            double,
+        });
+        pos = skip_gap(text, content_end + 1)?;
+    }
+    if pieces.len() < 2 {
+        return None;
+    }
+    // Self-check: rejoined pieces must reproduce the folded value exactly.
+    let mut joined = Vec::new();
+    for piece in &pieces {
+        joined.extend_from_slice(&unescape_piece(piece, source)?);
+    }
+    if joined.as_slice() != folded {
+        return None;
+    }
+    Some(pieces)
+}
+
+/// Unescape one scanned piece; `None` on anything outside the common
+/// escape rules (the caller then keeps the folded literal).
+fn unescape_piece(piece: &AdjacentPiece, source: &[u8]) -> Option<Vec<u8>> {
+    let inner = source.get(piece.start + piece.open_len..piece.end - 1)?;
+    unescape_bytes(inner, piece.double)
+}
+
+/// Unescape raw string content under double- (`true`) or single-quoted
+/// rules; `None` on anything outside the common escape rules.
+fn unescape_bytes(inner: &[u8], double: bool) -> Option<Vec<u8>> {
+    fn hex(value: u8) -> Option<u8> {
+        match value {
+            b'0'..=b'9' => Some(value - b'0'),
+            b'a'..=b'f' => Some(value - b'a' + 10),
+            b'A'..=b'F' => Some(value - b'A' + 10),
+            _ => None,
+        }
+    }
+    let mut out = Vec::with_capacity(inner.len());
+    let mut i = 0;
+    while i < inner.len() {
+        let byte = inner[i];
+        if byte != b'\\' || !double {
+            if byte == b'\\' {
+                // Single-quoted: only `\\` and `\'` are special.
+                match inner.get(i + 1) {
+                    Some(b'\\') => out.push(b'\\'),
+                    Some(b'\'') => out.push(b'\''),
+                    _ => {
+                        out.push(b'\\');
+                        continue;
+                    }
+                }
+                i += 2;
+                continue;
+            }
+            out.push(byte);
+            i += 1;
+            continue;
+        }
+        let next = *inner.get(i + 1)?;
+        match next {
+            b'\\' | b'"' | b'\'' => {
+                out.push(next);
+                i += 2;
+            }
+            b'n' => {
+                out.push(b'\n');
+                i += 2;
+            }
+            b't' => {
+                out.push(b'\t');
+                i += 2;
+            }
+            b'r' => {
+                out.push(b'\r');
+                i += 2;
+            }
+            b'f' => {
+                out.push(0x0c);
+                i += 2;
+            }
+            b'v' => {
+                out.push(0x0b);
+                i += 2;
+            }
+            b'a' => {
+                out.push(0x07);
+                i += 2;
+            }
+            b'e' => {
+                out.push(0x1b);
+                i += 2;
+            }
+            b's' => {
+                out.push(b' ');
+                i += 2;
+            }
+            b'\n' => i += 2,
+            b'0'..=b'7' => {
+                let mut value = 0u32;
+                let mut taken = 0;
+                while taken < 3 {
+                    match inner.get(i + 1 + taken).copied() {
+                        Some(d @ b'0'..=b'7') => {
+                            value = value * 8 + u32::from(d - b'0');
+                            taken += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                out.push((value & 0xff) as u8);
+                i += 1 + taken;
+            }
+            b'x' => {
+                let hi = hex(*inner.get(i + 2)?)?;
+                let mut value = u32::from(hi);
+                let mut taken = 1;
+                if let Some(lo) = inner.get(i + 3).copied().and_then(hex) {
+                    value = value * 16 + u32::from(lo);
+                    taken = 2;
+                }
+                out.push((value & 0xff) as u8);
+                i += 2 + taken;
+            }
+            b'u' => {
+                let (codepoint, taken) = if inner.get(i + 2) == Some(&b'{') {
+                    let mut value = 0u32;
+                    let mut j = i + 3;
+                    let mut any = false;
+                    loop {
+                        match inner.get(j).copied() {
+                            Some(b'}') if any => break,
+                            Some(b' ') | Some(b'\t') if any => j += 1,
+                            Some(d) => {
+                                value = value * 16 + u32::from(hex(d)?);
+                                any = true;
+                                j += 1;
+                            }
+                            None => return None,
+                        }
+                    }
+                    (value, j + 1 - (i + 1))
+                } else {
+                    let mut value = 0u32;
+                    for k in 0..4 {
+                        value = value * 16 + u32::from(hex(*inner.get(i + 2 + k)?)?);
+                    }
+                    (value, 5)
+                };
+                let ch = char::from_u32(codepoint)?;
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                i += 1 + taken;
+            }
+            b'c' | b'C' => {
+                let raw = *inner.get(i + 2)?;
+                let value = match raw {
+                    b'?' => 0x7f,
+                    b'a'..=b'z' | b'A'..=b'Z' => raw.to_ascii_uppercase() & 0x1f,
+                    b'[' | b'\\' | b']' | b'^' | b'_' => raw & 0x1f,
+                    _ => return None,
+                };
+                out.push(value);
+                i += 3;
+            }
+            b'M' => {
+                // `\M-X` and `\M-\C-X`; anything else stays folded.
+                if inner.get(i + 2) != Some(&b'-') {
+                    return None;
+                }
+                let raw = *inner.get(i + 3)?;
+                if raw == b'\\'
+                    && (inner.get(i + 4) == Some(&b'c') || inner.get(i + 4) == Some(&b'C'))
+                {
+                    let ctrl = *inner.get(i + 5)?;
+                    let value = match ctrl {
+                        b'?' => 0x7f,
+                        b'a'..=b'z' | b'A'..=b'Z' => ctrl.to_ascii_uppercase() & 0x1f,
+                        _ => return None,
+                    };
+                    out.push(0x80 | value);
+                    i += 6;
+                } else {
+                    out.push(0x80 | raw);
+                    i += 4;
+                }
+            }
+            _ => {
+                out.push(next);
+                i += 2;
+            }
+        }
+    }
+    Some(out)
 }
 
 /// Concatenated bytes of plain `Str` parts.
@@ -1553,6 +2213,10 @@ fn build_params_refs(items: &[&Mri], pool: &mut Pool, shadows: &mut Vec<Node>) -
     }
     let mut slots = ParamSlots::default();
     let mut seen_rest = false;
+    // A required positional after an optional is a post parameter, like
+    // after a rest (mirrors Prism's `requireds`/`posts` split and the
+    // reference `aspec`: `|x = 0, y|` counts `ma=0, oa=1, pa=1`).
+    let mut seen_optional = false;
     for item in expanded {
         match item {
             Mri::Arg(inner) => {
@@ -1561,20 +2225,23 @@ fn build_params_refs(items: &[&Mri], pool: &mut Pool, shadows: &mut Vec<Node>) -
                     span: espan(item),
                     name: sym(pool, &inner.name),
                 };
-                if seen_rest {
+                if seen_rest || seen_optional {
                     slots.posts.push(param);
                 } else {
                     slots.requireds.push(param);
                 }
             }
-            Mri::Optarg(inner) => slots.optionals.push(Node::OptionalParameterNode {
-                flags: 0,
-                span: espan(item),
-                name: sym(pool, &inner.name),
-                name_loc: span(&inner.name_l),
-                operator_loc: span(&inner.operator_l),
-                value: Box::new(conv(&inner.default, pool)),
-            }),
+            Mri::Optarg(inner) => {
+                seen_optional = true;
+                slots.optionals.push(Node::OptionalParameterNode {
+                    flags: 0,
+                    span: espan(item),
+                    name: sym(pool, &inner.name),
+                    name_loc: span(&inner.name_l),
+                    operator_loc: span(&inner.operator_l),
+                    value: Box::new(conv(&inner.default, pool)),
+                });
+            }
             Mri::Restarg(inner) => {
                 seen_rest = true;
                 slots.rest = Some(Box::new(Node::RestParameterNode {
@@ -1636,7 +2303,7 @@ fn build_params_refs(items: &[&Mri], pool: &mut Pool, shadows: &mut Vec<Node>) -
             Mri::Procarg0(inner) => {
                 let target =
                     lower_destructured(&inner.args, &inner.begin_l, &inner.end_l, item, pool);
-                if seen_rest {
+                if seen_rest || seen_optional {
                     slots.posts.push(target);
                 } else {
                     slots.requireds.push(target);
@@ -1645,7 +2312,7 @@ fn build_params_refs(items: &[&Mri], pool: &mut Pool, shadows: &mut Vec<Node>) -
             Mri::Mlhs(inner) => {
                 let target =
                     lower_mlhs_target(&inner.items, &inner.begin_l, &inner.end_l, item, pool);
-                if seen_rest {
+                if seen_rest || seen_optional {
                     slots.posts.push(target);
                 } else {
                     slots.requireds.push(target);
@@ -1659,7 +2326,7 @@ fn build_params_refs(items: &[&Mri], pool: &mut Pool, shadows: &mut Vec<Node>) -
             // Unreachable in valid trees: keep the node as a required slot.
             other => {
                 let param = conv(other, pool);
-                if seen_rest {
+                if seen_rest || seen_optional {
                     slots.posts.push(param);
                 } else {
                     slots.requireds.push(param);
@@ -2183,18 +2850,23 @@ fn lower_masgn(inner: &Masgn, node: &Mri, pool: &mut Pool) -> Node {
     }
 }
 
-/// `Numblock` lowering: numbered parameters stay blank (`maximum` zero).
+/// `Numblock` lowering: `numargs` feeds `NumberedParametersNode.maximum`
+/// (the reference emits `OP_ENTER REQ(max)`); a `Lambda` call builds a
+/// lambda (`-> { _1 }`) instead of attaching a block.
 fn lower_numblock(inner: &Numblock, node: &Mri, pool: &mut Pool) -> Node {
     let whole = espan(node);
+    let numbered = || {
+        Box::new(Node::NumberedParametersNode {
+            flags: 0,
+            span: span(&inner.expression_l),
+            maximum: inner.numargs,
+        })
+    };
     let block = Box::new(Node::BlockNode {
         flags: 0,
         span: whole,
         locals: Vec::new(),
-        parameters: Some(Box::new(Node::NumberedParametersNode {
-            flags: 0,
-            span: span(&inner.expression_l),
-            maximum: 0,
-        })),
+        parameters: Some(numbered()),
         body: Some(seq_one(&inner.body, pool)),
         opening_loc: span(&inner.begin_l),
         closing_loc: span(&inner.end_l),
@@ -2228,7 +2900,17 @@ fn lower_numblock(inner: &Numblock, node: &Mri, pool: &mut Pool) -> Node {
             call_node_flags::SAFE_NAVIGATION,
             pool,
         ),
-        // Unreachable in valid trees: numbered block on `super`/lambda.
+        // Unreachable in valid trees: numbered block on `super`.
+        Mri::Lambda(lam) => Node::LambdaNode {
+            flags: 0,
+            span: whole,
+            locals: Vec::new(),
+            operator_loc: span(&lam.expression_l),
+            opening_loc: span(&inner.begin_l),
+            closing_loc: span(&inner.end_l),
+            parameters: Some(numbered()),
+            body: Some(seq_one(&inner.body, pool)),
+        },
         other => conv(other, pool),
     }
 }
