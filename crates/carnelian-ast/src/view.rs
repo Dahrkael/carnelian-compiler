@@ -1038,8 +1038,8 @@ pub trait BackendNode: AstNode + Clone + Sized {
         None
     }
 
-    /// Match-write `=~` call (`MatchWriteNode`); the named-capture
-    /// targets bind no locals, so only the call emits code.
+    /// Match-write `=~` call (`MatchWriteNode`); targets occupy LVAR
+    /// slots but emit no stores, so only the call emits code.
     fn match_write(&self) -> Option<Self> {
         None
     }

@@ -798,6 +798,24 @@ pub const P26_SNIPPETS: &[(&str, &str)] = &[
         "match_write_noval",
         "x = \"ab\"\n/(?<c>a)/ =~ x\nputs 2\n",
     ),
+    // Keyword captures bind nothing (Prism `pm_local_is_keyword`).
+    (
+        "match_write_keyword",
+        "x = \"ab\"\nif /(?<class>a)/ =~ x then puts 1\nend\nputs 2\n",
+    ),
+    // Dotted `=~` stays a plain call (no `MatchWriteNode`).
+    (
+        "match_write_dotted",
+        "x = \"ab\"\nif /(?<c>a)/.=~(x) then puts 1\nend\nputs 2\n",
+    ),
+    // `(?#...)` comments hold no captures.
+    (
+        "match_write_comment",
+        "x = \"ab\"\nif /(?# (?<c>a))b/ =~ x then puts 1\nend\nputs 2\n",
+    ),
+    ("rational_hex", "puts 0x10r\n"),
+    ("rational_oct", "puts 017r\n"),
+    ("defined_regexp_recv", "puts defined?(/a/.foo)\n"),
     ("case_in_alt", "x = 2\ncase x\nin 1 | 2 then puts 1\nelse puts 2\nend\n"),
     (
         "case_in_alt_chain",

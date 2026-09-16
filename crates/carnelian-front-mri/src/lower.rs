@@ -739,28 +739,25 @@ fn conv(node: &Mri, pool: &mut Pool) -> Node {
             let receiver = conv(&inner.re, pool);
             let arg = conv(&inner.value, pool);
             let arg_span = espan(&inner.value);
-            Node::MatchWriteNode {
+            let call = Node::CallNode {
                 flags: 0,
                 span: whole,
-                call: Box::new(Node::CallNode {
+                receiver: Some(Box::new(receiver)),
+                call_operator_loc: None,
+                name: sym(pool, "=~"),
+                message_loc: Some(span(&inner.operator_l)),
+                opening_loc: None,
+                arguments: Some(Box::new(Node::ArgumentsNode {
                     flags: 0,
-                    span: whole,
-                    receiver: Some(Box::new(receiver)),
-                    call_operator_loc: None,
-                    name: sym(pool, "=~"),
-                    message_loc: Some(span(&inner.operator_l)),
-                    opening_loc: None,
-                    arguments: Some(Box::new(Node::ArgumentsNode {
-                        flags: 0,
-                        span: arg_span,
-                        arguments: vec![arg],
-                    })),
-                    closing_loc: None,
-                    equal_loc: None,
-                    block: None,
-                }),
-                targets: Vec::new(),
-            }
+                    span: arg_span,
+                    arguments: vec![arg],
+                })),
+                closing_loc: None,
+                equal_loc: None,
+                block: None,
+            };
+            // Single shape path (plain infix `=~` by construction here).
+            match_write_of(call, whole, pool)
         }
         Mri::Mlhs(inner) => {
             lower_mlhs_target(&inner.items, &inner.begin_l, &inner.end_l, node, pool)
@@ -1255,7 +1252,17 @@ fn lower_send_parts(
         }
         (name, ospan(&selector_l.copied()), None)
     };
-    Node::CallNode {
+    // Prism creates `MatchWriteNode` only on the plain infix-operator path;
+    // dotted/parenthesized/block/multi-arg/safe-nav shapes stay plain calls
+    // (verified call sites in vendored `prism.c`).
+    let plain_match = method == "=~"
+        && dot.is_none()
+        && begin_l.is_none()
+        && end_l.is_none()
+        && block.is_none()
+        && args.len() == 1
+        && extra_flags & (call_node_flags::SAFE_NAVIGATION | call_node_flags::ATTRIBUTE_WRITE) == 0;
+    let call = Node::CallNode {
         flags,
         span: whole,
         receiver: recv.map(|recv| Box::new(conv(recv, pool))),
@@ -1267,6 +1274,35 @@ fn lower_send_parts(
         closing_loc: ospan(&end_l.copied()),
         equal_loc,
         block,
+    };
+    if plain_match {
+        match_write_of(call, whole, pool)
+    } else {
+        call
+    }
+}
+
+/// `regexp =~ value` with a static named-capture regexp binds the captures
+/// (reference LVAR table); mirror Prism's `MatchWriteNode`. Any other shape
+/// (interpolated/dynamic receiver, reversed order, no captures) binds
+/// nothing (all probed against the reference).
+fn match_write_of(call: Node, span: Span, pool: &mut Pool) -> Node {
+    let captures = match &call {
+        Node::CallNode {
+            receiver: Some(receiver),
+            ..
+        } => match_capture_targets(receiver, span, pool),
+        _ => Vec::new(),
+    };
+    if captures.is_empty() {
+        call
+    } else {
+        Node::MatchWriteNode {
+            flags: 0,
+            span,
+            call: Box::new(call),
+            targets: captures,
+        }
     }
 }
 
@@ -1829,6 +1865,137 @@ fn split_mlhs(items: &[Mri], pool: &mut Pool) -> (Vec<Node>, Option<Box<Node>>, 
             (lefts, rest, rights)
         }
     }
+}
+
+/// Keywords can never be capture bindings: Prism's named-capture callback
+/// (`pm_local_is_keyword`) skips them, so a keyword-only regexp binds
+/// nothing at all (verified against vendored `prism.c`; `END`/`BEGIN` are
+/// *not* excluded, mirroring the case-sensitive check).
+const CAPTURE_KEYWORDS: [&str; 38] = [
+    "do",
+    "if",
+    "in",
+    "or",
+    "and",
+    "def",
+    "end",
+    "for",
+    "nil",
+    "not",
+    "case",
+    "else",
+    "next",
+    "redo",
+    "self",
+    "then",
+    "true",
+    "when",
+    "alias",
+    "begin",
+    "break",
+    "class",
+    "elsif",
+    "false",
+    "retry",
+    "super",
+    "undef",
+    "until",
+    "while",
+    "yield",
+    "ensure",
+    "module",
+    "rescue",
+    "return",
+    "unless",
+    "__LINE__",
+    "__FILE__",
+    "__ENCODING__",
+];
+
+/// Named captures (`(?<name>`, `(?'name'`) of a static regexp literal, in
+/// source order, for `MatchWriteNode` targets. Interpolated or dynamic
+/// receivers bind nothing: the reference LVAR table grows only for static
+/// regexps (probed), so anything else yields no targets.
+fn match_capture_targets(receiver: &Node, span: Span, pool: &mut Pool) -> Vec<Node> {
+    fn is_name_start(b: u8) -> bool {
+        b.is_ascii_alphabetic() || b == b'_'
+    }
+    fn is_name_part(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'_'
+    }
+    let Node::RegularExpressionNode {
+        unescaped, flags, ..
+    } = receiver
+    else {
+        return Vec::new();
+    };
+    let extended = flags & regular_expression_flags::EXTENDED != 0;
+    let bytes = unescaped.as_slice();
+    let mut names: Vec<&[u8]> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'[' => {
+                // Character class: skip to the unescaped `]`.
+                i += 1;
+                while i < bytes.len() && bytes[i] != b']' {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            b'(' if bytes.get(i + 1) == Some(&b'?') => {
+                // `(?#...)` is a comment, never a group.
+                if bytes.get(i + 2) == Some(&b'#') {
+                    i += 3;
+                    while i < bytes.len() && bytes[i] != b')' {
+                        i += 1;
+                    }
+                    i += 1;
+                    continue;
+                }
+                let (open, close) = match bytes.get(i + 2) {
+                    Some(b'<') => (i + 3, b'>'),
+                    Some(b'\'') => (i + 3, b'\''),
+                    _ => {
+                        i += 1;
+                        continue;
+                    }
+                };
+                let mut j = open;
+                while j < bytes.len() && bytes[j] != close {
+                    j += 1;
+                }
+                let name = &bytes[open..j.min(bytes.len())];
+                if j < bytes.len()
+                    && !name.is_empty()
+                    && is_name_start(name[0])
+                    && name.iter().all(|b| is_name_part(*b))
+                    && !names.contains(&name)
+                    && !CAPTURE_KEYWORDS.contains(&core::str::from_utf8(name).unwrap_or_default())
+                {
+                    names.push(name);
+                }
+                i = j + 1;
+            }
+            b'#' if extended => {
+                // Extended mode: `#` starts a comment to end of line.
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    names
+        .iter()
+        .map(|name| Node::LocalVariableTargetNode {
+            flags: 0,
+            span,
+            name: raw_sym(pool, name),
+            depth: 0,
+        })
+        .collect()
 }
 
 /// Assignment target: writes become `*Target` nodes, `depth` blank.
@@ -3281,6 +3448,30 @@ fn parse_float(text: &str) -> f64 {
 /// for `u128` math, best-effort decimal shift beyond that.
 fn parse_rational(text: &str) -> (Integer, Integer) {
     let body = text.strip_suffix('r').unwrap_or(text);
+    // Non-decimal mantissa (`0x10r`, `0b101r`, `0o17r`, `017r`): a valid
+    // parse carries no `.`/exponent there, and the decimal splitter below
+    // misreads hex digits (`0x1er` as mantissa+exponent). Share
+    // `convert_int`'s radix-aware accumulation over denominator 1.
+    let unsigned = body
+        .strip_prefix('-')
+        .or_else(|| body.strip_prefix('+'))
+        .unwrap_or(body);
+    let explicit = unsigned.as_bytes();
+    let non_decimal = (explicit.len() > 2
+        && explicit[0] == b'0'
+        && matches!(explicit[1], b'x' | b'X' | b'b' | b'B' | b'o' | b'O'))
+        || (explicit.len() > 1
+            && explicit[0] == b'0'
+            && explicit[1] != b'.'
+            && !explicit.contains(&b'e')
+            && !explicit.contains(&b'E')
+            && explicit
+                .iter()
+                .all(|b| (*b >= b'0' && *b <= b'7') || *b == b'_'));
+    if non_decimal {
+        let (numerator, _) = convert_int(body);
+        return (numerator, u128_to_integer(1));
+    }
     let (mantissa, exp) = split_exponent(body);
     let (int_part, frac_part) = match mantissa.find('.') {
         Some(dot) => (&mantissa[..dot], &mantissa[dot + 1..]),

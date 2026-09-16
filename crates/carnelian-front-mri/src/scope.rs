@@ -345,6 +345,35 @@ impl Resolver<'_> {
 
     #[allow(clippy::too_many_lines)]
     fn walk(&mut self, node: &mut Node) {
+        // A bare call (`name`, no receiver/args/block/parens) naming an
+        // already-declared local is a read: locals shadow methods. This heals
+        // parsers that cannot pre-declare names — MRI `=~` capture bindings
+        // surface here as `MatchWriteNode` targets bound by this same walk,
+        // so later uses resolve while earlier ones stay calls, like Prism.
+        let read = match node {
+            Node::CallNode {
+                receiver: None,
+                arguments: None,
+                block: None,
+                opening_loc: None,
+                closing_loc: None,
+                call_operator_loc: None,
+                equal_loc: None,
+                name,
+                span,
+                ..
+            } => self.lookup(*name).map(|depth| (*span, *name, depth)),
+            _ => None,
+        };
+        if let Some((span, name, depth)) = read {
+            *node = Node::LocalVariableReadNode {
+                flags: 0,
+                span,
+                name,
+                depth,
+            };
+            return;
+        }
         match node {
             Node::AliasGlobalVariableNode {
                 new_name, old_name, ..

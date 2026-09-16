@@ -1195,7 +1195,8 @@ fn pattern_matching() {
     }
 }
 
-/// Named-capture matches synthesize a `=~` call with empty targets.
+/// Named-capture matches synthesize a `=~` call with one target per
+/// capture name (mirrors the reference LVAR table, which binds them).
 ///
 /// The pinned parser never emits this node without the `onig` feature
 /// (its `match_op` falls back to `Send`), so the test builds it by hand.
@@ -1216,7 +1217,13 @@ fn match_write_shape() {
             ref targets,
             ..
         } => {
-            assert!(targets.is_empty());
+            assert_eq!(targets.len(), 1);
+            match targets[0] {
+                Node::LocalVariableTargetNode { name, .. } => {
+                    assert_eq!(sym_name(&pool, name), b"w")
+                }
+                ref other => panic!("target lowered to {}", other.kind_name()),
+            }
             match **call {
                 Node::CallNode { name, .. } => assert_eq!(sym_name(&pool, name), b"=~"),
                 ref other => panic!("call lowered to {}", other.kind_name()),

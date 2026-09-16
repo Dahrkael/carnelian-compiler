@@ -596,3 +596,66 @@ A → B via patches (`master` untouched).
   `view.block` check in `attr_assign_simple_args`, shared
   `gen_combined_rhs` tail, unified GET/SET opcode maps, dropping
   `push_n(1); pop_n(1);` no-ops, one diagnostic constructor.
+
+## Magic literals (U1-U6, merged to dev)
+
+Ports `__FILE__`/`__LINE__`/`__ENCODING__`, `1r`/`1i`, `` `cmd` ``,
+`/re/`, `:"a#{b}"`, `=~` named captures. Six parallel units (batch
+U1+U2+U5+U6, then U3+U4), integrated U6→U1→U5→U2→U3→U4 via patches.
+
+- U1: `source_file/line/encoding` views + 3 arms. Deviation: `__FILE__`
+  bakes the `Codegen` compile filename (`-e` default), not node bytes —
+  parses carry no filepath option; identical in every reachable context
+  (probed pool `Str "-e"`).
+- U2: `rational/imaginary` views + arms; shared `emit_integer_lit` and
+  `prism_integer_lit` helpers instead of duplicating limb logic.
+- U5: shared `gen_interp_loop` + `gen_interp_symbol` (STRING→SYMBOL
+  peephole vs INTERN tail); one `codegen_supports` line so
+  `defined?(:"a#{x}")` evaluates.
+- U6: `match_write`/`ImplicitNode` delegates; `match_write_gated` stayed
+  gated on `RegularExpressionNode` until U4 (its regexp receiver).
+- U3: `xstring/interp_xstring` views + arms (backtick presym, `Kernel`
+  interning order kept); mirrored interp loop (NOVAL semantics differ
+  from `gen_interp_string`).
+- U4: `regexp/interp_regexp` views + arms + `regexp_flag_strings`
+  (`i/x/m`, `e/n/s/u`, no `o`); interning order `Regexp`→source→opt/enc→
+  `compile`; `LOADNIL` placeholder only in the plain arm.
+- Exit state: workspace suite green (incl. ~60 new snippets 4-way × both
+  modes), `clippy -D warnings` / `fmt` clean, `wasm32` pure-path check
+  passes.
+
+## Reviewer round on magic literals (4 real fixes applied, rest declined)
+
+- Keyword captures bound wrongly (`/(?<class>a)/`): Prism
+  `pm_local_is_keyword` skips them (verified list in vendored `prism.c`,
+  incl. `__LINE__/__FILE__/__ENCODING__`, case-sensitive). Fix: reject the
+  exact list in `match_capture_targets`; keyword-only regexps stay plain
+  calls (no `MatchWriteNode`, like Prism's lazy creation).
+- `parse_rational` radix-blind (`0x10r` → 10, `0x1er` exponent misfire):
+  pre-existing, newly reachable via U2. Fix: non-decimal fast path
+  sharing `convert_int` over denominator 1 (incl. legacy `017r`).
+- `match_write_of` over-wrapped (`/re/.=~(x)`, `&.`, blocks, multi-arg):
+  Prism creates `MatchWriteNode` only on the plain infix path. Fix: gate
+  on 1 arg, no block/parens/dot, no safe-nav/attr flags, in
+  `lower_send_parts`; `MatchWithLvasgn` arm routes through it.
+- Capture scanner missed `(?#...)` and `/x` `#` comments (phantom
+  LVARs): skip both, using the node's flags word for extended mode.
+- Applied suggestions: scope-rewrite loc guards, all new literal kinds
+  in `codegen_supports` (reference accepts every `defined?(lit.foo)`,
+  probed), `match_write` doc reword. Declined: STRCAT/prologue dedup
+  (C-mirror hot paths, precedent).
+- Lock-in goldens: `match_write_keyword/dotted/comment`,
+  `rational_hex/oct`, `defined_regexp_recv`.
+
+## MRI capture binding (coordinator follow-up, same tranche)
+
+U4 exposed it: `/(?<c>a)/ =~ x` compiled on mri but 1 byte short
+(`nlocals` 2 vs 3) — MRI lowering dropped the capture locals while the
+reference LVAR table holds `[x, c]`. Fix in `front-mri`, all
+reference-probed: `MatchWithLvasgn` fills targets by scanning the static
+regexp (`match_capture_targets`); `=~` sends route through
+`match_write_of` (plain infix shape only); the scope pass rewrites a bare
+call naming a declared local into a read (locals shadow methods, like the
+parser). Binding rules mirror Prism exactly: static regexp only (interp/
+dynamic bind nothing), reversed `"str" =~ /re/` binds nothing, use-before-
+bind stays a call, barriers respected.
